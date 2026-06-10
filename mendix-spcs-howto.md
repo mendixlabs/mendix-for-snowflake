@@ -119,7 +119,7 @@ Run in Snowsight or via CLI:
 
 ### Step 3a: Create Snowflake Postgres Instance (Recommended)
 
-This provides a persistent, managed database. No sidecar container needed.
+This provides a persistent, managed database.
 
 ```sql
 USE ROLE ACCOUNTADMIN;
@@ -240,14 +240,6 @@ docker push "$registry/mendix-app:poc"
 
 > Note: The registry path uses **lowercase** database/schema/repo names (e.g., `my_database/public/poc_repo`).
 
-**Pull, tag and push PostgreSQL:**
-
-```powershell
-docker pull --platform linux/amd64 postgres:16
-docker tag postgres:16 "$registry/postgres:16"
-docker push "$registry/postgres:16"
-```
-
 **Verify images landed:**
 ```sql
 SELECT SYSTEM$REGISTRY_LIST_IMAGES('/<DATABASE>/<SCHEMA>/<IMAGE_REPO>');
@@ -263,7 +255,7 @@ SELECT SYSTEM$REGISTRY_LIST_IMAGES('/<DATABASE>/<SCHEMA>/<IMAGE_REPO>');
 
 ## Step 5: Deploy the Service
 
-The service can be created with an inline spec. Below shows the **recommended** setup using Snowflake Postgres (no sidecar):
+The service can be created with an inline spec. Below shows the setup using Snowflake Postgres:
 
 ```sql
 USE ROLE ACCOUNTADMIN;
@@ -317,82 +309,6 @@ spec:
       logLevel: INFO
 $$;
 ```
-
-<details>
-<summary>Alternative: Sidecar PostgreSQL (for quick throwaway testing without Snowflake Postgres)</summary>
-
-This runs a PostgreSQL container alongside Mendix. Data is ephemeral (lost on DROP SERVICE).
-
-```sql
-USE ROLE ACCOUNTADMIN;
-USE DATABASE <DATABASE>;
-
-CREATE SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE
-  IN COMPUTE POOL MENDIX_POC_POOL
-  MIN_INSTANCES = 1
-  MAX_INSTANCES = 1
-  FROM SPECIFICATION $$
-spec:
-  containers:
-    - name: mendix-app
-      image: /<database>/<schema>/<image_repo>/mendix-app:poc
-      env:
-        RUNTIME_PARAMS_DATABASETYPE: "POSTGRESQL"
-        RUNTIME_PARAMS_DATABASEHOST: "localhost:5432"
-        RUNTIME_PARAMS_DATABASENAME: "mendix"
-        RUNTIME_PARAMS_DATABASEUSERNAME: "mendix"
-        RUNTIME_PARAMS_DATABASEPASSWORD: "<your-db-password>"
-        RUNTIME_PARAMS_COM_MENDIX_CORE_STORAGESERVICE: "com.mendix.storage.localfilesystem"
-        RUNTIME_PARAMS_UPLOADEDFILESPATH: "/mnt/filestorage"
-        M2EE_ADMIN_PASS: "<your-admin-password>"
-        RUNTIME_ADMINUSER_PASSWORD: "<your-admin-password>"
-      readinessProbe:
-        port: 8080
-        path: /
-      volumeMounts:
-        - name: filestorage
-          mountPath: /mnt/filestorage
-      resources:
-        requests:
-          memory: 2G
-          cpu: 1
-        limits:
-          memory: 4G
-          cpu: 2
-    - name: postgres
-      image: /<database>/<schema>/<image_repo>/postgres:16
-      env:
-        POSTGRES_DB: "mendix"
-        POSTGRES_USER: "mendix"
-        POSTGRES_PASSWORD: "<your-db-password>"
-      volumeMounts:
-        - name: pgdata
-          mountPath: /var/lib/postgresql/data
-      resources:
-        requests:
-          memory: 512M
-          cpu: 0.5
-        limits:
-          memory: 1G
-          cpu: 1
-  endpoints:
-    - name: mendix-web
-      port: 8080
-      public: true
-  volumes:
-    - name: filestorage
-      source: stage
-      stageConfig:
-        name: "@<DATABASE>.<SCHEMA>.MENDIX_FILESTORAGE_STAGE"
-    - name: pgdata
-      source: local
-  logExporters:
-    eventTableConfig:
-      logLevel: INFO
-$$;
-```
-
-</details>
 
 > Note: Image paths inside the spec use **lowercase** (e.g., `/<database>/<schema>/<image_repo>/mendix-app:poc`).
 
@@ -599,23 +515,21 @@ CREATE SERVICE ... ;
 ## Architecture (POC)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  SPCS Service: MENDIX_SERVICE                           │
-│  Compute Pool: MENDIX_POC_POOL (CPU_X64_S)             │
-│                                                         │
-│  ┌─────────────────────┐  ┌──────────────────────────┐ │
-│  │  mendix-app          │  │  postgres                │ │
-│  │  Port 8080 (app)     │──│  Port 5432               │ │
-│  │  Port 8090 (admin)   │  │  Data: local volume      │ │
-│  │  Storage: stage vol   │  └──────────────────────────┘ │
-│  └─────────────────────┘                                │
-│                                                         │
-│  Endpoint: mendix-web (public, Snowflake auth)          │
-└─────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│  SPCS Service: MENDIX_SERVICE                                 │
+│  Compute Pool: MENDIX_POC_POOL (CPU_X64_S)                   │
+│                                                               │
+│  ┌─────────────────────┐                                      │
+│  │  mendix-app          │──── EAI ──── Snowflake Postgres     │
+│  │  Port 8080 (app)     │             (managed, persistent)   │
+│  │  Port 8090 (admin)   │                                     │
+│  │  Storage: stage vol   │                                     │
+│  └─────────────────────┘                                      │
+│                                                               │
+│  Endpoint: mendix-web (public, Snowflake auth)                │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-**Limitations of POC setup:**
-- PostgreSQL data is ephemeral (local volume — survives suspend/resume but lost on DROP)
-- No horizontal scaling (each instance has its own PG)
+**Notes:**
 - Trial license has user and time limits
-- For production: use Snowflake Postgres via Private Link (requires Business Critical edition)
+- SPCS egress IP ranges expire periodically; monitor and update the Postgres network rule
