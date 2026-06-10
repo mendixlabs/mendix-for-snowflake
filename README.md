@@ -8,7 +8,7 @@ A deployment toolkit for running Mendix apps on SPCS:
 
 - **deploy.ps1** - One-command deploy script. Takes a Mendix PAD package (zip), builds a Docker image, pushes to the Snowflake registry, and updates the running service.
 - **deploy-config.json** - Configuration file with database, service, and resource settings. Each developer maintains their own copy.
-- **SnowflakeSSO module** - Mendix module that reads the `Sf-Context-Current-User` header injected by SPCS and auto-logs users into Mendix using their Snowflake identity. No separate Mendix login required.
+- **SnowflakeSSO module** - Mendix module that reads the `Sf-Context-Current-User` header injected by SPCS and auto-logs users into Mendix using their Snowflake identity. No separate Mendix login required. Requires the included `login.html` to replace the default Mendix login page.
 - **mendix-spcs-howto.md** - Step-by-step setup guide covering Snowflake infrastructure, Postgres instance, image registry, service deployment, and troubleshooting.
 
 ## Architecture
@@ -76,14 +76,3 @@ SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs 0.11 credi
 - No custom domain support on SPCS endpoints
 - Trial Mendix license terminates after ~2 hours (production license recommended)
 - Stage volumes do not support random writes or file appends (fine for Mendix's write-once file pattern)
-
-## Repository Structure
-
-| Path | Purpose |
-|------|---------|
-| `App Components/SnowflakeSSO.mpk` | Mendix module that implements SSO using the Snowflake identity header. |
-| `App Components/login.html` | Custom login page that replaces the default Mendix login to support the SSO flow. |
-| `Deploy Script/deploy.ps1` | PowerShell script that builds, pushes, and deploys a Mendix PAD package to SPCS in one command. |
-| `Deploy Script/deploy-config.example.json` | Template configuration file for the deploy script; copy and fill in your environment values. |
-| `mendix-spcs-howto.md` | Step-by-step guide covering full setup from Snowflake infrastructure to running service. |
-| `mendix-spcs-caveats-and-ideas.md` | Known limitations and future work for this deployment approach. |
