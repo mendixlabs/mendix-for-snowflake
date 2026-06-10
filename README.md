@@ -35,6 +35,8 @@ User (Snowflake Auth) --> SPCS Public Endpoint --> Mendix Runtime (JDK 21)
 
 ## Quick Start
 
+The script handles extraction, Docker build, registry push, and service update. First-time setup requires running the infrastructure SQL from the howto.
+
 1. Create a Portable App Distribution package in Studio Pro (App > Create Deployment Package > Portable package)
 2. Copy `deploy-config.json`, fill in your environment values
 3. Run:
@@ -42,8 +44,6 @@ User (Snowflake Auth) --> SPCS Public Endpoint --> Mendix Runtime (JDK 21)
 ```powershell
 .\deploy.ps1 -PadPath "path\to\MyApp_portable_20260609.zip"
 ```
-
-The script handles extraction, Docker build, registry push, and service update. First-time setup requires running the infrastructure SQL from the howto.
 
 ## File Storage
 
@@ -62,7 +62,7 @@ The SnowflakeSSO module eliminates the Mendix login page. SPCS authenticates use
 
 ## Cost
 
-SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs ~0.11 credits/hour (~$0.32/hour at $3/credit). The deploy-config includes scheduled tasks to suspend the service outside office hours.
+SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs 0.11 credits/hour ($0.32/hour at $3/credit). The deploy-config includes scheduled tasks to suspend the service outside office hours.
 
 ## Docs
 
@@ -76,3 +76,14 @@ SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs ~0.11 cred
 - No custom domain support on SPCS endpoints
 - Trial Mendix license terminates after ~2 hours (production license recommended)
 - Stage volumes do not support random writes or file appends (fine for Mendix's write-once file pattern)
+
+## Repository Structure
+
+| Path | Purpose |
+|------|---------|
+| `App Components/SnowflakeSSO.mpk` | Mendix module that implements SSO using the Snowflake identity header. |
+| `App Components/login.html` | Custom login page that replaces the default Mendix login to support the SSO flow. |
+| `Deploy Script/deploy.ps1` | PowerShell script that builds, pushes, and deploys a Mendix PAD package to SPCS in one command. |
+| `Deploy Script/deploy-config.example.json` | Template configuration file for the deploy script; copy and fill in your environment values. |
+| `mendix-spcs-howto.md` | Step-by-step guide covering full setup from Snowflake infrastructure to running service. |
+| `mendix-spcs-caveats-and-ideas.md` | Known limitations and future work for this deployment approach. |

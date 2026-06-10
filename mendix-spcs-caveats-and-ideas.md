@@ -14,16 +14,6 @@ SPCS assigns a URL of the form `<hash>-<org>-<account>.snowflakecomputing.app` a
 
 ---
 
-### Snowflake authentication layer on public endpoints
-
-All public SPCS endpoints require Snowflake authentication. Browser access redirects through Snowflake's OAuth flow; programmatic access requires a PAT in the Authorization header.
-
-**Impact:** End users must have Snowflake accounts and be granted access to the service endpoint. This prevents anonymous/public-facing apps.
-
-**Open question:** Does Mendix's session management (cookies, XASSESSIONID) work correctly behind Snowflake's auth proxy? Initial testing shows the React client works, but more validation is needed for SSO modules, deep links, and API consumers.
-
----
-
 ### Stage volume performance not yet benchmarked
 
 The Mendix file storage is backed by a Snowflake stage volume. Stage volumes are optimized for large sequential reads/writes, not random I/O.
@@ -84,17 +74,6 @@ The egress IPs used to whitelist SPCS on the Snowflake Postgres network policy (
 - Can Mendix's Database Connector module connect to Snowflake via JDBC inside an SPCS container?
 - Does the auto-refreshed OAuth token work with the standard Snowflake JDBC driver?
 - Performance implications of mixing Snowflake queries with the app's transactional PG database?
-
----
-
-### Auto-suspend/resume for cost management
-
-**What:** SPCS services with public endpoints do not auto-suspend based on HTTP inactivity. The compute pool charges credits as long as the service is running.
-
-**Workaround ideas:**
-- Scheduled task to suspend at night: `CREATE TASK ... AS ALTER SERVICE ... SUSPEND;`
-- Service auto-resumes when a user hits the endpoint (if `AUTO_RESUME = TRUE` on pool and service)
-- Users see a brief error page for 30-60 seconds while the service wakes up
 
 ---
 

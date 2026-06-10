@@ -542,7 +542,29 @@ ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE SUSPEND;
 ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE RESUME;
 ```
 
-**Full drop and recreate (new endpoint URL, data in local volumes lost):**
+**Scheduled suspend for demos/POC (optional, saves credits outside office hours):**
+
+SPCS services with public endpoints do not auto-suspend on inactivity. For demos or POC environments that don't need 24/7 uptime, create scheduled tasks to suspend outside office hours:
+
+```sql
+-- Suspend at 6 PM UK time on weekdays
+CREATE TASK <DATABASE>.<SCHEMA>.SUSPEND_MENDIX_EVENING
+  SCHEDULE = 'USING CRON 0 18 * * 1-5 Europe/London'
+  ALLOW_OVERLAPPING_EXECUTION = FALSE
+AS ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE SUSPEND;
+
+-- Resume at 8 AM UK time on weekdays
+CREATE TASK <DATABASE>.<SCHEMA>.RESUME_MENDIX_MORNING
+  SCHEDULE = 'USING CRON 0 8 * * 1-5 Europe/London'
+  ALLOW_OVERLAPPING_EXECUTION = FALSE
+AS ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE RESUME;
+
+-- Enable the tasks (created suspended by default)
+ALTER TASK <DATABASE>.<SCHEMA>.SUSPEND_MENDIX_EVENING RESUME;
+ALTER TASK <DATABASE>.<SCHEMA>.RESUME_MENDIX_MORNING RESUME;
+```
+
+The service stays suspended on weekends and evenings. If someone needs access outside these hours, a manual `ALTER SERVICE ... RESUME` or hitting the endpoint (with `AUTO_RESUME = TRUE` on the compute pool) will bring it back in ~2 minutes.
 ```sql
 DROP SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE;
 CREATE SERVICE ... ;
