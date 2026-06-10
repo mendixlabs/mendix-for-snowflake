@@ -1,0 +1,32 @@
+{
+  "// INSTRUCTIONS": "Copy this file and fill in your values. The 'snowConnection' is the name of your connection in ~/.snowflake/connections.toml.",
+
+  "snowConnection": "<your-snow-cli-connection-name>",
+
+  "service": {
+    "name": "<DATABASE>.<SCHEMA>.MENDIX_SERVICE",
+    "computePool": "<YOUR_COMPUTE_POOL>",
+    "imageRepo": "<database>/<schema>/<image_repo>",
+    "imageName": "mendix-app",
+    "externalAccessIntegration": "<YOUR_PG_EAI>"
+  },
+
+  "database": {
+    "host": "<your-pg-host>.postgres.snowflake.app",
+    "port": 5432,
+    "name": "postgres",
+    "username": "application",
+    "password": "<your-pg-application-password>",
+    "useSsl": true
+  },
+
+  "mendix": {
+    "adminPassword": "<your-mendix-admin-password>",
+    "fileStorageStage": "@<DATABASE>.<SCHEMA>.MENDIX_FILESTORAGE_STAGE"
+  },
+
+  "resources": {
+    "memory": { "request": "2G", "limit": "4G" },
+    "cpu": { "request": 1, "limit": 2 }
+  }
+}
