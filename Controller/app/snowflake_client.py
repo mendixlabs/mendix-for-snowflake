@@ -14,7 +14,8 @@ _DB_SCHEMA = os.environ["DB_SCHEMA"]
 
 
 def _read_token() -> str:
-    return open("/snowflake/session/token").read().strip()
+    with open("/snowflake/session/token") as f:
+        return f.read().strip()
 
 
 def _db_and_schema() -> tuple[str, str]:
@@ -92,8 +93,8 @@ def drop_service(name: str) -> None:
 
 
 def show_service_status(name: str) -> str | None:
-    # LIKE treats _ as a single-char wildcard, so filter by exact name after fetching.
-    rows = execute_sql(f"SHOW SERVICES LIKE '{name}' IN SCHEMA {_DB_SCHEMA}")
+    # LIKE treats _ as a wildcard; skip it and filter client-side from the full schema list.
+    rows = execute_sql(f"SHOW SERVICES IN SCHEMA {_DB_SCHEMA}")
     exact = [r for r in rows if r.get("name") == name]
     if not exact:
         return None

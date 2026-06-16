@@ -102,6 +102,9 @@ $stageDest  = "$stageRef/apps/$AppName/current.zip"
 $sizeMb     = '{0:N1}' -f ((Get-Item $PadPath).Length / 1MB)
 
 Write-Host "Uploading '$fileName' ($sizeMb MB) to stage..." -ForegroundColor Cyan
+# Remove existing file first to prevent snow stage copy from nesting the new file inside
+# a directory named current.zip (happens when the destination already exists as a file).
+& snow stage remove $stageDest --connection $conn 2>$null
 & snow stage copy $PadPath $stageDest --connection $conn --overwrite
 
 if ($LASTEXITCODE -ne 0) {

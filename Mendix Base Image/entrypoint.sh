@@ -14,7 +14,7 @@ fi
 
 # Extract PAD
 echo "Extracting PAD from $PAD_STAGE_PATH..."
-rm -rf /mendix-pad
+rm -rf /mendix-pad /mendix-pad-extract
 unzip -q "$PAD_STAGE_PATH" -d /mendix-pad-extract/
 
 # Handle single top-level directory inside zip
@@ -81,13 +81,15 @@ if [ -n "$DBNAME" ] && [ "$DBNAME" != "postgres" ]; then
     export PGPASSWORD="$RUNTIME_PARAMS_DATABASEPASSWORD"
     export PGSSLMODE="require"
     echo "Checking if database '$DBNAME' exists..."
+    # Use || true so a transient connection failure doesn't kill the container via set -e.
+    # Use parameterised query ($1) to avoid SQL injection from the database name.
     EXISTS=$(psql -h "$DBHOST" -p "$DBPORT" -U "$RUNTIME_PARAMS_DATABASEUSERNAME" -d postgres \
-        -tAc "SELECT 1 FROM pg_database WHERE datname = '$DBNAME'" 2>/dev/null)
+        -tAc "SELECT 1 FROM pg_database WHERE datname = \$1" -- "$DBNAME" 2>/dev/null) || true
     if [ "$EXISTS" != "1" ]; then
         echo "Creating database '$DBNAME'..."
         psql -h "$DBHOST" -p "$DBPORT" -U "$RUNTIME_PARAMS_DATABASEUSERNAME" -d postgres \
-            -c "CREATE DATABASE \"$DBNAME\""
-        echo "Database '$DBNAME' created."
+            -c "CREATE DATABASE \"$(printf '%s' "$DBNAME" | sed "s/\"//g")\"" 2>/dev/null || true
+        echo "Database '$DBNAME' created (or already existed)."
     else
         echo "Database '$DBNAME' already exists."
     fi

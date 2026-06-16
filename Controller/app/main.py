@@ -43,7 +43,8 @@ def _pg_host() -> str:
     if _PG_HOST is None:
         secret_file = "/secrets/pg_host/secret_string"
         if os.path.exists(secret_file):
-            _PG_HOST = open(secret_file).read().strip()
+            with open(secret_file) as f:
+                _PG_HOST = f.read().strip()
         else:
             _PG_HOST = os.environ.get("PG_HOST", "localhost:5432")
     return _PG_HOST
@@ -191,7 +192,11 @@ def create_app(req: CreateAppRequest):
     # Read the actual PG password from the controller's own mounted secret (CTRL_PG_PASS).
     # req.pg_database is the target database name, not the password.
     _pg_pass_file = "/secrets/pg_pass/secret_string"
-    pg_password = open(_pg_pass_file).read().strip() if os.path.exists(_pg_pass_file) else ""
+    if os.path.exists(_pg_pass_file):
+        with open(_pg_pass_file) as f:
+            pg_password = f.read().strip()
+    else:
+        pg_password = ""
     if not pg_password:
         raise HTTPException(status_code=500, detail="Controller PG password secret not mounted at /secrets/pg_pass")
     sf.create_or_replace_secret(_secret_fqn(req.name, "PG_PASS"), pg_password)
@@ -277,8 +282,15 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
 
         if constants_changed:
             _sync_constant_secrets(name, pad_constants, new_constants)
+            # Build spec from the full merged constant set so every mounted secret is present,
+            # not just the constants declared in this specific PAD version.
+            all_constants = [
+                PadConstant(name=k, env_var="", default=v,
+                            secret_name="MX_CONST_" + k.replace(".", "_").upper())
+                for k, v in new_constants.items()
+            ]
             spec = _build_spec(name, record.pg_database, ResourceTier(record.resource_tier),
-                               pad_constants, record.use_caller_rights)
+                               all_constants, record.use_caller_rights)
             sf.alter_service_spec(record.service_name, spec)
         else:
             sf.suspend_service(record.service_name)
@@ -361,15 +373,20 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
         raise HTTPException(status_code=404, detail=f"App '{name}' not found")
 
     from .pad_parser import PadConstant as PC
-    constants: list[PadConstant] = []
     for const_name, value in req.constants.items():
         secret_name = "MX_CONST_" + const_name.replace(".", "_").upper()
         sf.create_or_replace_secret(_const_secret_fqn(name, secret_name), value)
-        constants.append(PC(name=const_name, env_var="", default=value, secret_name=secret_name))
 
     merged = {**(record.constants or {}), **req.constants}
+
+    # Build the full constant list (merged set) so _build_spec mounts ALL secrets, not just the ones updated.
+    all_constants = [
+        PC(name=k, env_var="", default=v,
+           secret_name="MX_CONST_" + k.replace(".", "_").upper())
+        for k, v in merged.items()
+    ]
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
-    background_tasks.add_task(_run_update_constants, name, record.service_name, merged, record, constants)
+    background_tasks.add_task(_run_update_constants, name, record.service_name, merged, record, all_constants)
     return {"status": "DEPLOYING"}
 
 
