@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 import yaml
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, status
@@ -158,6 +161,14 @@ def _sync_constant_secrets(app_name: str, constants: list[PadConstant], values: 
         sf.create_or_replace_secret(_const_secret_fqn(app_name, c.secret_name), val)
 
 
+def _constants_from_dict(d: dict[str, str]) -> list[PadConstant]:
+    return [
+        PadConstant(name=k, env_var="", default=v,
+                    secret_name="MX_CONST_" + k.replace(".", "_").upper())
+        for k, v in d.items()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -204,11 +215,10 @@ def create_app(req: CreateAppRequest):
 
     # Create constant secrets from provided values (using defaults for any not supplied)
     constants: list[PadConstant] = []  # no PAD yet at create time
-    for name, value in req.constants.items():
-        from .pad_parser import PadConstant as PC
-        secret_name = "MX_CONST_" + name.replace(".", "_").upper()
+    for const_name, value in req.constants.items():
+        secret_name = "MX_CONST_" + const_name.replace(".", "_").upper()
         sf.create_or_replace_secret(_const_secret_fqn(req.name, secret_name), value)
-        constants.append(PC(name=name, env_var="", default=value, secret_name=secret_name))
+        constants.append(PadConstant(name=const_name, env_var="", default=value, secret_name=secret_name))
 
     spec = _build_spec(req.name, req.pg_database, req.resource_tier, constants, req.use_caller_rights)
 
@@ -282,15 +292,8 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
 
         if constants_changed:
             _sync_constant_secrets(name, pad_constants, new_constants)
-            # Build spec from the full merged constant set so every mounted secret is present,
-            # not just the constants declared in this specific PAD version.
-            all_constants = [
-                PadConstant(name=k, env_var="", default=v,
-                            secret_name="MX_CONST_" + k.replace(".", "_").upper())
-                for k, v in new_constants.items()
-            ]
             spec = _build_spec(name, record.pg_database, ResourceTier(record.resource_tier),
-                               all_constants, record.use_caller_rights)
+                               _constants_from_dict(new_constants), record.use_caller_rights)
             sf.alter_service_spec(record.service_name, spec)
         else:
             sf.suspend_service(record.service_name)
@@ -311,8 +314,11 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
             "last_deployed_at": datetime.now(timezone.utc).isoformat(),
         })
     except Exception:
-        registry.update_app(name, {"last_deploy_status": "FAILED"})
-        raise
+        try:
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+        except Exception:
+            pass
+        logger.exception("Deploy failed for %s", name)
 
 
 @app.post("/apps/{name}/deploy", status_code=202)
@@ -362,8 +368,11 @@ def _run_update_constants(name: str, service_name: str, merged: dict,
             return
         registry.update_app(name, {"constants": merged, "last_deploy_status": "READY"})
     except Exception:
-        registry.update_app(name, {"last_deploy_status": "FAILED"})
-        raise
+        try:
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+        except Exception:
+            pass
+        logger.exception("Constants update failed for %s", name)
 
 
 @app.put("/apps/{name}/constants", status_code=202)
@@ -372,21 +381,13 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
     if not record:
         raise HTTPException(status_code=404, detail=f"App '{name}' not found")
 
-    from .pad_parser import PadConstant as PC
     for const_name, value in req.constants.items():
         secret_name = "MX_CONST_" + const_name.replace(".", "_").upper()
         sf.create_or_replace_secret(_const_secret_fqn(name, secret_name), value)
 
     merged = {**(record.constants or {}), **req.constants}
-
-    # Build the full constant list (merged set) so _build_spec mounts ALL secrets, not just the ones updated.
-    all_constants = [
-        PC(name=k, env_var="", default=v,
-           secret_name="MX_CONST_" + k.replace(".", "_").upper())
-        for k, v in merged.items()
-    ]
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
-    background_tasks.add_task(_run_update_constants, name, record.service_name, merged, record, all_constants)
+    background_tasks.add_task(_run_update_constants, name, record.service_name, merged, record, _constants_from_dict(merged))
     return {"status": "DEPLOYING"}
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import textwrap
 import threading
@@ -7,7 +8,10 @@ from typing import Any
 
 import snowflake.connector
 
-_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+
+# RLock so execute_sql can hold the lock while calling get_connection (which also acquires it).
+_lock = threading.RLock()
 _conn: snowflake.connector.SnowflakeConnection | None = None
 
 _DB_SCHEMA = os.environ["DB_SCHEMA"]
@@ -42,17 +46,18 @@ def get_connection() -> snowflake.connector.SnowflakeConnection:
 
 
 def execute_sql(sql: str, params: tuple = ()) -> list[dict]:
-    conn = get_connection()
-    try:
-        cur = conn.cursor(snowflake.connector.DictCursor)
-        cur.execute(sql, params)
-        return cur.fetchall()
-    except Exception:
-        # Force reconnect on next call using current (possibly refreshed) token
-        global _conn
-        with _lock:
+    # Hold the lock for the entire operation: the Snowflake connector is not
+    # thread-safe on a single connection, so concurrent cursor use would interleave.
+    with _lock:
+        conn = get_connection()
+        try:
+            cur = conn.cursor(snowflake.connector.DictCursor)
+            cur.execute(sql, params)
+            return cur.fetchall()
+        except Exception:
+            global _conn
             _conn = None
-        raise
+            raise
 
 
 def create_or_replace_secret(fqn: str, value: str) -> None:
@@ -93,12 +98,13 @@ def drop_service(name: str) -> None:
 
 
 def show_service_status(name: str) -> str | None:
-    # LIKE treats _ as a wildcard; skip it and filter client-side from the full schema list.
-    rows = execute_sql(f"SHOW SERVICES IN SCHEMA {_DB_SCHEMA}")
-    exact = [r for r in rows if r.get("name") == name]
-    if not exact:
+    try:
+        rows = execute_sql(f"DESCRIBE SERVICE {_DB_SCHEMA}.{name}")
+        if rows:
+            return rows[0].get("status")
+    except Exception:
         return None
-    return exact[0].get("status")
+    return None
 
 
 def get_service_endpoint(name: str) -> str | None:
@@ -116,9 +122,9 @@ def set_caller_token_validity(name: str, secs: int = 1800) -> None:
             f"ALTER SERVICE {_DB_SCHEMA}.{name} "
             f"SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = {secs}"
         )
-    except Exception:
-        # Not all Snowflake versions support service-level parameter; fall back to schema level.
-        execute_sql(f"ALTER SCHEMA {_DB_SCHEMA} SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = {secs}")
+    except Exception as e:
+        # Schema-level fallback intentionally omitted: it would affect all services in the schema.
+        logger.warning("Could not set SERVICE_CALLER_TOKEN_VALIDITY_SECS on %s: %s", name, e)
 
 
 def get_service_logs(name: str, container: str = "mendix-app", lines: int = 100) -> str:

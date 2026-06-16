@@ -60,15 +60,16 @@ if [ -d "$SECRETS_DIR" ]; then
     fi
 fi
 
-# Resolve {SNOWFLAKE_HOST} placeholder in any env vars that contain it
+# Resolve {SNOWFLAKE_HOST} placeholder in any env vars that contain it.
+# Use null-delimited env output so multiline values (e.g. tokens) don't corrupt the parse.
 if [ -n "$SNOWFLAKE_HOST" ]; then
-    while IFS= read -r vardef; do
-        var="${vardef%%=*}"
-        val="${vardef#*=}"
+    while IFS= read -r -d '' entry; do
+        var="${entry%%=*}"
+        val="${entry#*=}"
         if [[ "$val" == *"{SNOWFLAKE_HOST}"* ]]; then
             export "$var"="${val//\{SNOWFLAKE_HOST\}/$SNOWFLAKE_HOST}"
         fi
-    done < <(env)
+    done < <(env -0)
 fi
 
 # Auto-create PG database if it doesn't exist

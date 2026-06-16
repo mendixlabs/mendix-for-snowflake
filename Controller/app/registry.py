@@ -64,9 +64,18 @@ def list_apps() -> list[AppRecord]:
     return [_row_to_record(r) for r in rows]
 
 
+_ALLOWED_UPDATE_COLUMNS = frozenset({
+    "constants", "pad_stage_path", "endpoint_url",
+    "last_deploy_status", "last_deployed_at",
+})
+
+
 def update_app(name: str, fields: dict[str, Any]) -> None:
     if not fields:
         return
+    invalid = set(fields.keys()) - _ALLOWED_UPDATE_COLUMNS
+    if invalid:
+        raise ValueError(f"Invalid column(s) in update_app: {invalid}")
     set_clauses = []
     values = []
     for key, val in fields.items():
