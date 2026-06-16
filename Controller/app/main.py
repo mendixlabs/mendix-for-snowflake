@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 
 from . import registry, snowflake_client as sf
@@ -187,8 +187,14 @@ def create_app(req: CreateAppRequest):
     # Create filestorage stage
     sf.create_stage(filestorage_fqn)
 
-    # Create PG password and admin password secrets
-    sf.create_or_replace_secret(_secret_fqn(req.name, "PG_PASS"), req.pg_database)
+    # Create PG password and admin password secrets.
+    # Read the actual PG password from the controller's own mounted secret (CTRL_PG_PASS).
+    # req.pg_database is the target database name, not the password.
+    _pg_pass_file = "/secrets/pg_pass/secret_string"
+    pg_password = open(_pg_pass_file).read().strip() if os.path.exists(_pg_pass_file) else ""
+    if not pg_password:
+        raise HTTPException(status_code=500, detail="Controller PG password secret not mounted at /secrets/pg_pass")
+    sf.create_or_replace_secret(_secret_fqn(req.name, "PG_PASS"), pg_password)
     sf.create_or_replace_secret(_secret_fqn(req.name, "ADMIN_PASS"), req.admin_password)
 
     # Create constant secrets from provided values (using defaults for any not supplied)
@@ -206,8 +212,7 @@ def create_app(req: CreateAppRequest):
     if req.use_caller_rights:
         sf.set_caller_token_validity(service_name, 1800)
 
-    endpoint_url = sf.get_service_endpoint(service_name)
-
+    # Endpoint URL is not available until the service starts; it's captured by _run_deploy.
     record = AppRecord(
         name=req.name,
         service_name=service_name,
@@ -216,14 +221,14 @@ def create_app(req: CreateAppRequest):
         use_caller_rights=req.use_caller_rights,
         constants=req.constants,
         pad_stage_path=None,
-        endpoint_url=endpoint_url,
+        endpoint_url=None,
         last_deploy_status="STARTING",
         created_at=None,
         last_deployed_at=None,
     )
     registry.create_app(record)
 
-    return {"service_name": service_name, "endpoint_url": endpoint_url, "status": "STARTING"}
+    return {"service_name": service_name, "status": "STARTING"}
 
 
 @app.get("/apps/{name}")
@@ -235,45 +240,36 @@ def get_app(name: str):
     return AppStatusResponse(app=record, service_status=svc_status)
 
 
-@app.post("/apps/{name}/deploy")
-def deploy_pad(name: str, pad_file: UploadFile = File(...)):
+def _prepare_deploy(
+    name: str, pad_path: str
+) -> tuple[AppRecord, list[PadConstant], dict]:
+    """Parse and validate a PAD. Returns (record, pad_constants, new_constants). Raises HTTPException on error."""
     record = registry.get_app(name)
     if not record:
         raise HTTPException(status_code=404, detail=f"App '{name}' not found")
 
-    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    pad_constants = parse_from_zip(pad_path)
+    stored = record.constants or {}
+    missing = [c.name for c in pad_constants if c.name not in stored and not c.default]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={"detail": "New constants with no value", "missing": missing},
+        )
 
-    # Save upload to temp file
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-        shutil.copyfileobj(pad_file.file, tmp)
-        tmp_path = tmp.name
+    new_constants = {**stored}
+    for c in pad_constants:
+        if c.name not in new_constants:
+            new_constants[c.name] = c.default
 
+    return record, pad_constants, new_constants
+
+
+def _run_deploy(name: str, pad_path: str, record: AppRecord,
+                pad_constants: list[PadConstant], new_constants: dict) -> None:
+    """Background deploy task. registry status must be set to DEPLOYING before calling."""
     try:
-        # Parse constants from the uploaded PAD
-        pad_constants = parse_from_zip(tmp_path)
-
-        # Check for constants with no stored value
         stored = record.constants or {}
-        missing = [c.name for c in pad_constants if c.name not in stored and not c.default]
-        if missing:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return JSONResponse(
-                status_code=422,
-                content={"detail": "New constants with no value", "missing": missing},
-            )
-
-        # Write PAD to the mounted deploy stage (direct file I/O — stage is mounted at DEPLOY_STAGE_MOUNT)
-        dest_dir = os.path.join(DEPLOY_STAGE_MOUNT, "apps", name)
-        os.makedirs(dest_dir, exist_ok=True)
-        dest_path = os.path.join(dest_dir, "current.zip")
-        shutil.copy2(tmp_path, dest_path)
-
-        # Determine if any constant values changed
-        new_constants = {**stored}
-        for c in pad_constants:
-            if c.name not in new_constants:
-                new_constants[c.name] = c.default
-
         constants_changed = any(
             new_constants.get(c.name) != stored.get(c.name)
             for c in pad_constants
@@ -285,35 +281,81 @@ def deploy_pad(name: str, pad_file: UploadFile = File(...)):
                                pad_constants, record.use_caller_rights)
             sf.alter_service_spec(record.service_name, spec)
         else:
-            # Suspend → poll → resume
             sf.suspend_service(record.service_name)
             if not _poll_status(record.service_name, "SUSPENDED", timeout_secs=120):
                 raise RuntimeError(f"Service {record.service_name} did not suspend within 120s")
             sf.resume_service(record.service_name)
 
-        # Poll until RUNNING
         if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
-            logs = sf.get_service_logs(record.service_name)
             registry.update_app(name, {"last_deploy_status": "FAILED"})
-            raise HTTPException(status_code=500, detail=f"Service did not reach RUNNING state.\n{logs[-2000:]}")
+            return
 
-        pad_stage_path = f"apps/{name}/current.zip"
+        endpoint_url = sf.get_service_endpoint(record.service_name)
         registry.update_app(name, {
             "constants": new_constants,
-            "pad_stage_path": pad_stage_path,
+            "pad_stage_path": f"apps/{name}/current.zip",
+            "endpoint_url": endpoint_url,
             "last_deploy_status": "READY",
             "last_deployed_at": datetime.now(timezone.utc).isoformat(),
         })
-
-        endpoint_url = record.endpoint_url or sf.get_service_endpoint(record.service_name)
-        return DeployResponse(endpoint_url=endpoint_url, status="READY")
-
-    finally:
-        os.unlink(tmp_path)
+    except Exception:
+        registry.update_app(name, {"last_deploy_status": "FAILED"})
+        raise
 
 
-@app.put("/apps/{name}/constants")
-def update_constants(name: str, req: UpdateConstantsRequest):
+@app.post("/apps/{name}/deploy", status_code=202)
+def deploy_pad(name: str, pad_file: UploadFile = File(...),
+               background_tasks: BackgroundTasks = None):
+    """Upload a PAD zip. For large PADs (>50 MB) use snow stage copy + /trigger-deploy instead."""
+    dest_dir = os.path.join(DEPLOY_STAGE_MOUNT, "apps", name)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest_path = os.path.join(dest_dir, "current.zip")
+
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        shutil.copyfileobj(pad_file.file, tmp)
+        tmp_path = tmp.name
+    shutil.copy2(tmp_path, dest_path)
+    os.unlink(tmp_path)
+
+    record, pad_constants, new_constants = _prepare_deploy(name, dest_path)
+    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    background_tasks.add_task(_run_deploy, name, dest_path, record, pad_constants, new_constants)
+    return {"status": "DEPLOYING"}
+
+
+@app.post("/apps/{name}/trigger-deploy", status_code=202)
+def trigger_deploy(name: str, background_tasks: BackgroundTasks):
+    """Trigger deploy from a PAD already at stage path apps/{name}/current.zip."""
+    pad_path = os.path.join(DEPLOY_STAGE_MOUNT, "apps", name, "current.zip")
+    if not os.path.exists(pad_path):
+        raise HTTPException(
+            status_code=400,
+            detail=f"PAD not found at stage path apps/{name}/current.zip — upload it first.",
+        )
+    record, pad_constants, new_constants = _prepare_deploy(name, pad_path)
+    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    background_tasks.add_task(_run_deploy, name, pad_path, record, pad_constants, new_constants)
+    return {"status": "DEPLOYING"}
+
+
+def _run_update_constants(name: str, service_name: str, merged: dict,
+                          record: AppRecord, constants: list[PadConstant]) -> None:
+    """Background task for constants update."""
+    try:
+        spec = _build_spec(name, record.pg_database, ResourceTier(record.resource_tier),
+                           constants, record.use_caller_rights)
+        sf.alter_service_spec(service_name, spec)
+        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+            return
+        registry.update_app(name, {"constants": merged, "last_deploy_status": "READY"})
+    except Exception:
+        registry.update_app(name, {"last_deploy_status": "FAILED"})
+        raise
+
+
+@app.put("/apps/{name}/constants", status_code=202)
+def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: BackgroundTasks):
     record = registry.get_app(name)
     if not record:
         raise HTTPException(status_code=404, detail=f"App '{name}' not found")
@@ -326,18 +368,9 @@ def update_constants(name: str, req: UpdateConstantsRequest):
         constants.append(PC(name=const_name, env_var="", default=value, secret_name=secret_name))
 
     merged = {**(record.constants or {}), **req.constants}
-    spec = _build_spec(name, record.pg_database, ResourceTier(record.resource_tier),
-                       constants, record.use_caller_rights)
-    sf.alter_service_spec(record.service_name, spec)
-
-    registry.update_app(name, {"constants": merged, "last_deploy_status": "DEPLOYING"})
-
-    if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
-        registry.update_app(name, {"last_deploy_status": "FAILED"})
-        raise HTTPException(status_code=500, detail="Service did not reach RUNNING state after constants update")
-
-    registry.update_app(name, {"last_deploy_status": "READY"})
-    return {"status": "READY"}
+    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    background_tasks.add_task(_run_update_constants, name, record.service_name, merged, record, constants)
+    return {"status": "DEPLOYING"}
 
 
 @app.delete("/apps/{name}", status_code=status.HTTP_204_NO_CONTENT)

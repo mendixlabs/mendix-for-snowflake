@@ -1,75 +1,67 @@
 # How-To: Deploy Mendix on Snowpark Container Services (SPCS)
 
+This guide covers the controller-based deployment model. The controller is a FastAPI service that manages Mendix app lifecycle on SPCS: it provisions services, stores app constants as Snowflake secrets, and handles new-version deploys without Docker rebuilds per app.
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  SPCS: MENDIX_DEPLOY_CONTROLLER                                     │
+│  FastAPI service managing all Mendix app deployments                │
+│  Endpoint: public (PAT-authenticated)                               │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │ creates / alters / suspends / resumes
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+   │ app-a service│  │ app-b service│  │ ...          │
+   │ mendix-base  │  │ mendix-base  │  │              │
+   │ image        │  │ image        │  │              │
+   └──────────────┘  └──────────────┘  └──────────────┘
+              │               │
+              └───────────────┘
+                      │
+              Shared: compute pool, Postgres instance, EAI,
+                      MENDIX_DEPLOY_STAGE (PAD zips)
+```
+
+**Key concepts:**
+- One `mendix-base` Docker image handles all apps. Each app container reads its PAD zip from the Snowflake stage at startup.
+- App constants are stored as Snowflake GENERIC_STRING secrets, mounted into the container via `directoryPath`. No PAD baked into an image.
+- New version deploy = upload new PAD zip to stage + call the controller API. No Docker build.
+- The controller itself (`mendix-deploy-controller`) is a separate image built once and updated only when controller code changes.
+
+---
+
 ## Prerequisites
 
 ### Software
 
-| Requirement | Version / Notes | Install |
-|-------------|----------------|---------|
-| Mendix Studio Pro | 10.24.19+ or 11.6.5+ (PAD support required) | [mendix.com](https://www.mendix.com/studio-pro/) |
-| WSL 2 | Required on Windows for Docker to build `linux/amd64` images | `wsl --install` in an elevated terminal, then reboot |
-| Docker engine | Either **Rancher Desktop** (set engine to `dockerd`, not `containerd`) or **Docker Desktop** | [Rancher Desktop](https://rancherdesktop.io/) / [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
-| Snowflake CLI (`snow`) | 3.x+ (provides `snow sql`, registry auth) | `pip install snowflake-cli-labs` or see [docs](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) |
-| PowerShell | 5.1+ (ships with Windows 10/11; used by `deploy.ps1`) | Built-in |
+| Requirement | Notes |
+|-------------|-------|
+| Mendix Studio Pro 10.24.19+ or 11.6.5+ | PAD export required |
+| Docker (Rancher Desktop or Docker Desktop) | Needed for one-time base image build |
+| Rancher Desktop: use `dockerd (moby)` engine, not `containerd` | |
+| Snowflake CLI (`snow`) 3.x+ | `pip install snowflake-cli-labs` |
+| PowerShell 5.1+ | Ships with Windows 10/11 |
 
 ### Snowflake Account
 
-- A Snowflake account with **ACCOUNTADMIN** role access (compute pools, image repos, services, secrets, and network rules all require elevated privileges).
-- A **Programmatic Access Token (PAT)** for non-interactive CLI and Docker registry authentication. Generate one in Snowsight: User Menu > Preferences > Authentication > Programmatic access tokens.
+- ACCOUNTADMIN access for initial setup
+- Snowflake-managed Postgres instance (or bring your own)
+- A **Programmatic Access Token (PAT)** for non-interactive CLI and Docker registry auth
 
-### Network Access
+### Snowflake CLI Connection
 
-Your workstation must be able to reach:
-
-- `<org>-<account>.registry.snowflakecomputing.com` (Docker image push/pull)
-- `<account_locator>.<region>.snowflakecomputing.com` (Snowflake CLI)
-
-If you're behind a corporate proxy or firewall, ensure these hostnames are allowed on ports 443 (HTTPS) and the Docker registry port.
-
-### Rancher Desktop Configuration (if using Rancher)
-
-1. Open Rancher Desktop > Preferences > Container Engine.
-2. Select **dockerd (moby)** as the engine. The `containerd` engine does not expose the Docker CLI socket that `docker build`/`docker push` require.
-3. Restart Rancher Desktop after changing the engine.
-
-## Account Details Reference
-
-Before starting, gather your account details. You'll need them throughout this guide:
-
-| Field | How to Find | Format |
-|-------|-------------|--------|
-| Organization | `SELECT CURRENT_ORGANIZATION_NAME()` | e.g., `MYORG123` |
-| Account Name | `SELECT CURRENT_ACCOUNT_NAME()` | e.g., `MY_ACCOUNT` |
-| Account Locator | `SELECT CURRENT_ACCOUNT()` | e.g., `xy12345` |
-| Region | `SELECT CURRENT_REGION()` | e.g., `AWS_EU_WEST_2` |
-| Registry URL | `SHOW IMAGE REPOSITORIES` → `repository_url` column | `<org>-<account>.registry.snowflakecomputing.com` |
-
-> **Important:** The registry URL uses **hyphens** between org and account name (e.g., `myorg123-my-account`), even if your account name uses underscores (`MY_ACCOUNT`). Docker treats these as different hosts — always use the exact URL from `SHOW IMAGE REPOSITORIES`.
-
-**Placeholders used in this guide:**
-
-| Placeholder | Description | Example |
-|-------------|-------------|---------|
-| `<ACCOUNT_LOCATOR>` | Your account locator | `xy12345` |
-| `<REGION>` | Cloud region in CLI format (dots, not underscores) | `eu-west-2.aws` |
-| `<REGISTRY_HOST>` | Full registry hostname from `SHOW IMAGE REPOSITORIES` | `myorg-myaccount.registry.snowflakecomputing.com` |
-| `<DATABASE>` | Your target database name | `MY_DATABASE` |
-| `<SCHEMA>` | Your target schema | `PUBLIC` |
-| `<IMAGE_REPO>` | Image repository name | `POC_REPO` |
-| `<SNOWFLAKE_USER>` | Your Snowflake username | `JANE_DOE` |
-| `<WAREHOUSE>` | Your warehouse name | `COMPUTE_WH` |
-
----
-
-## Step 1: Configure Snowflake CLI Connection
-
-Edit `~/.snowflake/connections.toml` (note: this is `connections.toml`, NOT `config.toml`):
+Edit `~/.snowflake/connections.toml`:
 
 ```toml
 [mendix]
 account = "<ACCOUNT_LOCATOR>.<REGION>"
 user = "<SNOWFLAKE_USER>"
-password = "<your-PAT-token>"
+password = "<PAT-or-password>"
 database = "<DATABASE>"
 schema = "<SCHEMA>"
 warehouse = "<WAREHOUSE>"
@@ -77,85 +69,79 @@ role = "ACCOUNTADMIN"
 authenticator = "snowflake"
 ```
 
-**Key lessons:**
-- In `connections.toml`, connection names are top-level sections (no `connections.` prefix). The `connections.` prefix is only used in `config.toml`.
-- The `account` field must include the region: `<ACCOUNT_LOCATOR>.<REGION>` (e.g., `xy12345.eu-west-2.aws`). Without it you get `404 Not Found` on login. Convert the region from SQL format (`AWS_EU_WEST_2`) to CLI format (`eu-west-2.aws`).
-- Do NOT include `host` or `port` fields — the CLI resolves them from the account identifier.
-- Use a **Programmatic Access Token (PAT)** as the password to bypass MFA/Duo for non-interactive use. Generate one in Snowsight: User Menu → Preferences → Authentication → Programmatic access tokens.
-- Use `ACCOUNTADMIN` role for POC work (creating compute pools, services, secrets, image repos all require elevated privileges).
+Notes:
+- `account` must include the region: `xy12345.eu-west-2.aws` (convert from SQL format `AWS_EU_WEST_2`)
+- Do not include `host` or `port`
+- A PAT is recommended as the password for non-interactive use. Generate in Snowsight: User Menu > Preferences > Authentication > Programmatic access tokens. Leave role restriction empty for the connection PAT so it can authenticate for Docker registry pushes (which require ACCOUNTADMIN).
+- Verify with: `snow sql -q "SELECT CURRENT_USER(), CURRENT_ROLE();" --connection mendix`
 
 ---
 
-## Step 2: Build the Mendix PAD Container Image
+## One-Time Setup
 
-The deploy script (`deploy.ps1`) handles Docker image creation automatically. It generates a Dockerfile and entrypoint script tailored for SPCS, builds the image, and pushes it to the Snowflake registry.
+### Step 1: Snowflake Infrastructure
 
-You do not need to manually build or manage Docker images. Skip to Step 3 to set up the Snowflake infrastructure, then use the deploy script (Step 7) for all deployments.
-
-> **Before exporting a PAD:** If you want Snowflake SSO and caller's rights (querying Snowflake as the end user), set up the SnowflakeSSO module in your app first. See [Step 8: Set Up the SnowflakeSSO Module](#step-8-set-up-the-snowflakesso-module) for instructions. The module must be in the project before you export the PAD.
-
-For details on what the generated container contains, see the [Container Internals appendix](#appendix-container-internals) at the end of this document.
-
----
-
-## Step 3: Create Snowflake Infrastructure
-
-Run in Snowsight or via CLI:
-
-### Step 3a: Create Snowflake Postgres Instance (Recommended)
-
-This provides a persistent, managed database.
+Run as ACCOUNTADMIN:
 
 ```sql
-USE ROLE ACCOUNTADMIN;
+-- Database and schema
+CREATE DATABASE IF NOT EXISTS <DATABASE>;
+CREATE SCHEMA IF NOT EXISTS <DATABASE>.<SCHEMA>;
 
--- Account-level network policy (required for Docker registry access)
--- Without this, docker push/pull to the Snowflake registry fails with "Network policy is required"
--- Using 0.0.0.0/0 to avoid lockouts from dynamic IPs. Do NOT use a single /32 IP.
-CREATE NETWORK POLICY IF NOT EXISTS ALLOW_ALL_POLICY
-  ALLOWED_IP_LIST = ('0.0.0.0/0');
-ALTER ACCOUNT SET NETWORK_POLICY = ALLOW_ALL_POLICY;
+-- Image repository
+CREATE IMAGE REPOSITORY IF NOT EXISTS <DATABASE>.<SCHEMA>.<IMAGE_REPO>;
 
--- 1. Get SPCS egress IPs (needed for whitelisting)
+-- Compute pool
+CREATE COMPUTE POOL IF NOT EXISTS MENDIX_POC_POOL
+  MIN_NODES = 1
+  MAX_NODES = 3
+  INSTANCE_FAMILY = CPU_X64_S
+  AUTO_RESUME = TRUE
+  AUTO_SUSPEND_SECS = 3600;
+```
+
+### Step 2: Snowflake-Managed Postgres
+
+The SPCS egress network rule keeps Postgres network-isolated (only reachable from container services).
+
+```sql
+-- 1. Get SPCS egress IP ranges
 SELECT SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES();
--- Note the ipv4_prefix values
 
--- 2. Create ingress rule allowing SPCS to reach Postgres
+-- 2. Ingress rule for Postgres (use IPs from above)
 CREATE NETWORK RULE SPCS_TO_PG_INGRESS
   TYPE = IPV4
-  VALUE_LIST = ('<cidr1>', '<cidr2>')  -- from step 1
+  VALUE_LIST = ('<cidr1>', '<cidr2>', ...)
   MODE = POSTGRES_INGRESS;
 
 CREATE NETWORK POLICY MENDIX_PG_POLICY
   ALLOWED_NETWORK_RULE_LIST = (SPCS_TO_PG_INGRESS);
 
--- 3. Create the Postgres instance
+-- 3. Create the instance (save the output — credentials shown only once!)
 CREATE POSTGRES INSTANCE MENDIX_PG
-  COMPUTE_FAMILY = 'STANDARD_M'  -- smallest available varies by region
+  COMPUTE_FAMILY = 'STANDARD_M'
   STORAGE_SIZE_GB = 10
   AUTHENTICATION_AUTHORITY = POSTGRES
   POSTGRES_VERSION = 17
   NETWORK_POLICY = 'MENDIX_PG_POLICY';
 
--- IMPORTANT: Save the credentials shown! They cannot be retrieved again.
--- Note the 'host' and 'access_roles' from the output.
+-- 4. Egress rule so SPCS containers can reach Postgres
+CREATE NETWORK RULE MENDIX_PG_EGRESS
+  TYPE = HOST_PORT
+  MODE = EGRESS
+  VALUE_LIST = ('<pg-host>:5432');
 
--- 3b. Grant CREATEDB to the application user (required for multi-app support)
--- The Postgres instance is only reachable from SPCS (whitelisted egress IPs).
--- After the compute pool and EAI are created (steps 4-5 below), run this
--- one-shot SPCS job to grant the privilege. Replace <PG_HOST> and <ADMIN_PASSWORD>
--- with the host and snowflake_admin password from the CREATE POSTGRES output.
---
--- This is a ONE-TIME setup per Postgres instance. It allows the deploy entrypoint
--- to auto-create a separate database per app.
+CREATE EXTERNAL ACCESS INTEGRATION MENDIX_PG_EAI
+  ALLOWED_NETWORK_RULES = (MENDIX_PG_EGRESS)
+  ENABLED = TRUE;
 ```
 
-After completing steps 4 and 5 (EAI creation), run this job:
+**One-time: grant CREATEDB to the `application` Postgres user** (required for multi-app support — each app gets its own database, auto-created at startup):
+
+After the mendix-base image is built and pushed (Step 3), run this job:
 
 ```sql
--- One-time: grant CREATEDB to the application user via SPCS job
--- (PG is only reachable from within SPCS, not from your local machine)
-CREATE SERVICE YOUR_DB.PUBLIC.PG_SETUP_JOB
+CREATE SERVICE <DATABASE>.<SCHEMA>.PG_SETUP_JOB
   IN COMPUTE POOL MENDIX_POC_POOL
   MIN_INSTANCES = 1
   MAX_INSTANCES = 1
@@ -164,709 +150,381 @@ CREATE SERVICE YOUR_DB.PUBLIC.PG_SETUP_JOB
 spec:
   containers:
   - name: psql
-    image: /your_db/public/poc_repo/mendix-app:latest
-    command: ["bash", "-c", "apt-get update && apt-get install -y postgresql-client && PGPASSWORD='<ADMIN_PASSWORD>' PGSSLMODE=require psql -h <PG_HOST> -p 5432 -U snowflake_admin -d postgres -c 'ALTER USER application CREATEDB;'"]
+    image: /<database>/<schema>/<image_repo>/mendix-base:latest
+    command: ["bash", "-c", "PGPASSWORD='<application-password>' PGSSLMODE=require psql -h <pg-host> -p 5432 -U application -d postgres -c 'ALTER USER application CREATEDB;'"]
 $$;
 
--- Wait ~30 seconds, then check it worked:
-CALL SYSTEM$GET_SERVICE_LOGS('YOUR_DB.PUBLIC.PG_SETUP_JOB', '0', 'psql', 10);
+-- Wait ~30s, check the log:
+CALL SYSTEM$GET_SERVICE_LOGS('<DATABASE>.<SCHEMA>.PG_SETUP_JOB', '0', 'psql', 5);
 -- Should show: ALTER ROLE
 
--- Clean up:
-DROP SERVICE YOUR_DB.PUBLIC.PG_SETUP_JOB;
+DROP SERVICE <DATABASE>.<SCHEMA>.PG_SETUP_JOB;
 ```
 
-> **Note:** If this is your very first deploy (no `mendix-app:latest` image exists yet), do one deploy first with `database.name` set to `"postgres"` (the default database). After that image is in the registry, run this job, then change `database.name` to your app-specific name and redeploy.
+Notes:
+- Postgres credentials (host, application password) are in the `CREATE POSTGRES INSTANCE` output. Save them.
+- SPCS egress IPs have an expiry date. Monitor and update `SPCS_TO_PG_INGRESS` before they expire.
+- The Postgres instance is NOT reachable from your local machine. Use an SPCS job for any psql admin work.
 
-```sql
-DESCRIBE POSTGRES INSTANCE MENDIX_PG
-  ->> SELECT "property", "value" FROM $1 WHERE "property" IN ('state', 'host');
+### Step 3: Build and Push the Mendix Base Image
 
--- 5. Create EAI so SPCS can reach the Postgres host
-CREATE NETWORK RULE MENDIX_PG_EGRESS
-  TYPE = HOST_PORT
-  MODE = EGRESS
-  VALUE_LIST = ('<host_from_step_4>:5432');
-
-CREATE EXTERNAL ACCESS INTEGRATION MENDIX_PG_EAI
-  ALLOWED_NETWORK_RULES = (MENDIX_PG_EGRESS)
-  ENABLED = TRUE;
-```
-
-**Key lessons:**
-- SPCS egress IPs are found via `SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES()`. These have an expiry date; monitor and update the network rule before they expire.
-- The Postgres instance credentials are shown only at creation time. If lost, reset with `ALTER POSTGRES INSTANCE ... RESET ACCESS FOR 'application'`.
-- Mendix uses the `application` role (not `snowflake_admin`) for app-level access.
-- The `application` user needs CREATEDB privilege for multi-app deployments (one-time grant via the SPCS job above).
-- The default database is `postgres`; Mendix auto-creates its schema there.
-- `RUNTIME_PARAMS_DATABASEUSESSL: "true"` is required (Snowflake Postgres mandates TLS).
-- No Business Critical edition needed; this uses IP whitelisting over the public endpoint.
-
-### Step 3b: Create Base Infrastructure
-
-```sql
-USE ROLE ACCOUNTADMIN;
-
--- Database
-CREATE DATABASE IF NOT EXISTS <DATABASE>;
-CREATE SCHEMA IF NOT EXISTS <DATABASE>.<SCHEMA>;
-
--- Image repository, stages
-CREATE IMAGE REPOSITORY IF NOT EXISTS <DATABASE>.<SCHEMA>.<IMAGE_REPO>;
-CREATE STAGE IF NOT EXISTS <DATABASE>.<SCHEMA>.SPECS ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS <DATABASE>.<SCHEMA>.MENDIX_FILESTORAGE_STAGE
-  DIRECTORY = (ENABLE = TRUE)
-  ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-
--- Secrets
-CREATE SECRET IF NOT EXISTS <DATABASE>.<SCHEMA>.MENDIX_DB_CREDENTIALS
-  TYPE = PASSWORD
-  USERNAME = 'mendix'
-  PASSWORD = '<your-db-password>';
-
-CREATE SECRET IF NOT EXISTS <DATABASE>.<SCHEMA>.MENDIX_ADMIN_PASSWORD
-  TYPE = GENERIC_STRING
-  SECRET_STRING = '<your-mendix-admin-password>';
-
--- Optional: License secret (skip for trial mode)
--- CREATE SECRET <DATABASE>.<SCHEMA>.MENDIX_LICENSE
---   TYPE = PASSWORD
---   USERNAME = '<LICENSE_ID>'
---   PASSWORD = '<LICENSE_KEY>';
-
--- Compute pool
-CREATE COMPUTE POOL IF NOT EXISTS MENDIX_POC_POOL
-  MIN_NODES = 1
-  MAX_NODES = 1
-  INSTANCE_FAMILY = CPU_X64_S
-  AUTO_RESUME = TRUE
-  AUTO_SUSPEND_SECS = 3600;
-```
-
----
-
-## Step 4: Push Container Images
-
-**Login to Snowflake registry:**
+This is a generic Mendix runner. Build it once; all apps share it.
 
 ```powershell
-docker login <REGISTRY_HOST> -u <SNOWFLAKE_USER>
-# Enter your Snowflake password or PAT when prompted
+cd "Mendix Base Image"
+
+# Login to Snowflake image registry
+snow spcs image-registry login --connection mendix
+
+$registry = "$(snow spcs image-registry url --connection mendix)"
+$repo = "$registry/<database>/<schema>/<image_repo>"
+
+docker build -t mendix-base .
+docker tag mendix-base "$repo/mendix-base:latest"
+docker push "$repo/mendix-base:latest"
 ```
 
-**Tag and push Mendix app:**
+Notes:
+- The Docker connection uses `mendix` CLI credentials. If login fails with 401, ensure the `mendix` connection has a valid password/PAT without role restrictions in connections.toml. A PAT with `ROLE_RESTRICTION` set to a limited role will be rejected.
+- Build happens locally. The image is ~500 MB (Eclipse Temurin JDK 21 base).
 
-```powershell
-$registry = "<REGISTRY_HOST>/<database>/<schema>/<image_repo>"
-docker tag mendix-app:poc "$registry/mendix-app:poc"
-docker push "$registry/mendix-app:poc"
-```
+### Step 4: Set Up the Controller
 
-> Note: The registry path uses **lowercase** database/schema/repo names (e.g., `my_database/public/poc_repo`).
-
-**Verify images landed:**
-```sql
-SELECT SYSTEM$REGISTRY_LIST_IMAGES('/<DATABASE>/<SCHEMA>/<IMAGE_REPO>');
-```
-
-**Key lessons:**
-- If you get `Authorization Failure`, make sure you're logged in with the correct hostname (hyphens, not underscores) AND the correct role. The Docker token is tied to the role used at login.
-- If using a non-owner role, grant access: `GRANT READ, WRITE ON IMAGE REPOSITORY <DATABASE>.<SCHEMA>.<IMAGE_REPO> TO ROLE <role>;`
-- After changing roles, you must `docker logout` and `docker login` again to refresh the token.
-- In PowerShell, the `@` symbol in stage paths must be quoted (e.g., `'@<DATABASE>.<SCHEMA>.SPECS/'`) to avoid splatting errors.
-
----
-
-## Step 5: Deploy the Service
-
-The service can be created with an inline spec. Below shows the setup using Snowflake Postgres:
-
-```sql
-USE ROLE ACCOUNTADMIN;
-USE DATABASE <DATABASE>;
-
-CREATE SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE
-  IN COMPUTE POOL MENDIX_POC_POOL
-  MIN_INSTANCES = 1
-  MAX_INSTANCES = 1
-  EXTERNAL_ACCESS_INTEGRATIONS = (MENDIX_PG_EAI)
-  FROM SPECIFICATION $$
-spec:
-  containers:
-    - name: mendix-app
-      image: /<database>/<schema>/<image_repo>/mendix-app:latest
-      env:
-        RUNTIME_PARAMS_DATABASETYPE: "POSTGRESQL"
-        RUNTIME_PARAMS_DATABASEHOST: "<pg_host>:5432"
-        RUNTIME_PARAMS_DATABASENAME: "postgres"
-        RUNTIME_PARAMS_DATABASEUSERNAME: "application"
-        RUNTIME_PARAMS_DATABASEPASSWORD: "<application_password>"
-        RUNTIME_PARAMS_DATABASEUSESSL: "true"
-        RUNTIME_PARAMS_COM_MENDIX_CORE_STORAGESERVICE: "com.mendix.storage.localfilesystem"
-        RUNTIME_PARAMS_UPLOADEDFILESPATH: "/mnt/filestorage"
-        M2EE_ADMIN_PASS: "<your-admin-password>"
-        RUNTIME_ADMINUSER_PASSWORD: "<your-admin-password>"
-      readinessProbe:
-        port: 8080
-        path: /
-      volumeMounts:
-        - name: filestorage
-          mountPath: /mnt/filestorage
-      resources:
-        requests:
-          memory: 2G
-          cpu: 1
-        limits:
-          memory: 4G
-          cpu: 2
-  endpoints:
-    - name: mendix-web
-      port: 8080
-      public: true
-  volumes:
-    - name: filestorage
-      source: stage
-      stageConfig:
-        name: "@<DATABASE>.<SCHEMA>.MENDIX_FILESTORAGE_STAGE"
-  logExporters:
-    eventTableConfig:
-      logLevel: INFO
-capabilities:
-  securityContext:
-    executeAsCaller: true
-$$;
-```
-
-> Note: Image paths inside the spec use **lowercase** (e.g., `/<database>/<schema>/<image_repo>/mendix-app:poc`).
-
-**Key lessons about the service spec:**
-- Stage volume names must be **fully qualified** and start with `@`: use `"@DATABASE.SCHEMA.MENDIX_FILESTORAGE_STAGE"`, not just `"@mendix_filestorage_stage"`. Without full qualification, SPCS cannot resolve the stage.
-- Mendix PAD readiness probe is at `/probes/ready` on port 8090 (admin port). However, the admin port binds to `localhost` only and is not configurable in PAD. Use the **app port (8080)** with path `/` for the SPCS readiness probe instead, since it binds to `0.0.0.0` and is reachable by SPCS.
-- **Readiness probe strategy:** Use port 8080 with path `/` in the service spec (as shown above).
-- **Startup time:** Mendix PAD apps take 2-3 minutes to fully initialize (model sync, license check, task queues, DB schema setup). The readiness probe will fail during this time; this is expected. Don't assume a startup error until you've waited at least 3-4 minutes and checked the logs.
-- You must have an active database context (`USE DATABASE`) when creating a service, even if using fully qualified names.
-- Inline spec (`FROM SPECIFICATION $$...$$`) avoids needing to upload YAML to a stage; useful when stage uploads are blocked by network policies.
-
-**Critical: PAD environment variable naming**
-
-The Mendix PAD config system uses HOCON (in `etc/variables.conf`). Environment variables map to runtime settings via specific, **case-sensitive** names with **no separating underscores** between words. Getting these wrong causes silent fallback to defaults (e.g., HSQLDB instead of PostgreSQL).
-
-| Runtime Setting | Correct Env Var | WRONG (will be silently ignored) |
-|-----------------|-----------------|----------------------------------|
-| `DatabaseType` | `RUNTIME_PARAMS_DATABASETYPE` | `RUNTIME_PARAMS_DATABASE_TYPE` |
-| `DatabaseHost` | `RUNTIME_PARAMS_DATABASEHOST` | `RUNTIME_PARAMS_DATABASE_HOST` |
-| `DatabaseName` | `RUNTIME_PARAMS_DATABASENAME` | `RUNTIME_PARAMS_DATABASE_NAME` |
-| `DatabaseUserName` | `RUNTIME_PARAMS_DATABASEUSERNAME` | `RUNTIME_PARAMS_DATABASE_USERNAME` |
-| `DatabasePassword` | `RUNTIME_PARAMS_DATABASEPASSWORD` | `RUNTIME_PARAMS_DATABASE_PASSWORD` |
-| `DatabaseUseSsl` | `RUNTIME_PARAMS_DATABASEUSESSL` | n/a (required for Snowflake Postgres, set to `"true"`) |
-| `com.mendix.core.StorageService` | `RUNTIME_PARAMS_COM_MENDIX_CORE_STORAGESERVICE` | `MXRUNTIME_com_mendix_core_StorageService` |
-| `UploadedFilesPath` | `RUNTIME_PARAMS_UPLOADEDFILESPATH` | `MXRUNTIME_com_mendix_storage_localfilesystem_Location` |
-
-**Admin user password vs. admin API password (two separate things!):**
-
-| Env Var | Purpose | What it does |
-|---------|---------|--------------|
-| `M2EE_ADMIN_PASS` | M2EE admin API password | Authenticates requests to the management interface on port 8090 (probes, commands). Required for the PAD startup script to communicate with the runtime. |
-| `RUNTIME_ADMINUSER_PASSWORD` | MxAdmin application login | Creates/updates the MxAdmin user in the database on startup. This is what you type into the Mendix login page. Without it, the MxAdmin user does not exist and you cannot log in. |
-
-Both must be set. They can be the same value for POC work, but they serve different purposes.
-
-**Why this happens:** The PAD config file (`etc/variables.conf`) defines HOCON substitutions like `"DatabaseType" = ${?RUNTIME_PARAMS_DATABASETYPE}`. The env var name is derived by uppercasing the HOCON path: `runtime.params.DatabaseType` becomes `RUNTIME_PARAMS_DATABASETYPE`. Underscores in the original setting name (like in `DatabaseType`) are preserved as-is; no extra underscore is inserted. The old docker-buildpack used `MXRUNTIME_` prefixed vars with dot-separated names; PAD does not use that format.
-
-**How to find the correct env var for any setting:** Open `etc/variables.conf` in your PAD package and search for the setting name. The `${?ENV_VAR_NAME}` syntax shows the exact env var expected.
-
----
-
-## Step 6: Validate and Monitor
-
-**Check service status:**
-```sql
-SELECT SYSTEM$GET_SERVICE_STATUS('<DATABASE>.<SCHEMA>.MENDIX_SERVICE');
-```
-
-**View container logs:**
-```sql
-CALL SYSTEM$GET_SERVICE_LOGS('<DATABASE>.<SCHEMA>.MENDIX_SERVICE', '0', 'mendix-app', 200);
-CALL SYSTEM$GET_SERVICE_LOGS('<DATABASE>.<SCHEMA>.MENDIX_SERVICE', '0', 'postgres', 100);
-```
-
-**Get the public endpoint URL:**
-```sql
-SHOW ENDPOINTS IN SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE;
-```
-
-**Expected startup behavior:**
-- Compute pool takes ~2-3 minutes to go from IDLE → ACTIVE on first use
-- PostgreSQL container starts within seconds
-- Mendix container takes 1-2 minutes to fully initialize (model sync, license check, etc.)
-- Trial license warning is normal if no license secret is provided — app will still run
-
----
-
-## Step 7: Updating the Service
-
-**Use ALTER, not DROP/CREATE** to keep the same endpoint URL.
-
-### Quick deploy with script
-
-After making changes in Studio Pro, export a new PAD package and run:
-
-```powershell
-.\deploy.ps1 -PadPath "C:\path\to\MyApp_portable_20260608_1147.zip"
-```
-
-Or without the parameter (it will prompt you):
-
-```powershell
-.\deploy.ps1
-```
-
-The script handles: unzipping (if needed), Dockerfile creation, Docker build, push to Snowflake registry, and updating the service spec via `ALTER SERVICE ... FROM SPECIFICATION`. The endpoint URL is preserved.
-
-> **Critical: Why the script uses ALTER SERVICE, not suspend/resume**
->
-> SPCS pins the image digest (SHA256) when a service is created or its spec is applied. Even if you push a new image to the same `:latest` tag, suspend/resume will re-pull the **old pinned digest**. `ALTER SERVICE ... FROM SPECIFICATION` re-resolves the tag to the current digest. This is the only way to deploy a new image without changing the endpoint URL.
-
-You can also pass an already-extracted folder:
-
-```powershell
-.\deploy.ps1 -PadPath "C:\path\to\extracted\folder"
-```
-
-**Prerequisites for the script:**
-- Rancher Desktop running
-- Already logged in to the registry (`docker login <REGISTRY_HOST>`)
-- Snowflake CLI configured with the connection name specified in the script
-
-**Configuration:**
-
-All settings live in `deploy-config.json` alongside the script. Each developer needs their own copy:
+**Configure `Controller/controller-config.json`** (gitignored — never commit this):
 
 ```json
 {
-  "snowConnection": "mendix",
-  "service": { "name": "DB.SCHEMA.MENDIX_SERVICE", "imageRepo": "db/schema/repo", "imageName": "mendix-app", "externalAccessIntegration": "MENDIX_PG_EAI" },
-  "database": { "host": "<pg-host>", "port": 5432, "name": "postgres", "username": "application", "password": "<pg-password>", "useSsl": true },
-  "mendix": { "adminPassword": "<admin-pass>", "fileStorageStage": "@DB.SCHEMA.MENDIX_FILESTORAGE_STAGE" },
-  "resources": { "memory": { "request": "2G", "limit": "4G" }, "cpu": { "request": 1, "limit": 2 } }
+  "snowConnection": "<snow-cli-connection-name>",
+  "controllerPat": "<PAT-restricted-to-MENDIX_DEPLOY_CONTROLLER_ROLE>",
+  "snowflake": {
+    "database": "<SNOWFLAKE_DATABASE>",
+    "schema": "<SNOWFLAKE_SCHEMA>",
+    "computePool": "<COMPUTE_POOL_NAME>",
+    "warehouse": "<WAREHOUSE_NAME>",
+    "imageRepo": "<database>/<schema>/<image_repo>",
+    "pgEai": "<EXTERNAL_ACCESS_INTEGRATION_NAME>"
+  },
+  "postgres": {
+    "host": "<snowflake-managed-postgres-hostname>",
+    "port": 5432,
+    "username": "application",
+    "password": "<postgres-application-password>"
+  }
 }
 ```
 
-The registry host is derived automatically from the snow CLI connection (no need to configure it manually).
-
-Use `-Config "other-file.json"` to point at a different config (e.g., dev vs prod environments).
-
-**Security note:** `deploy-config.json` contains database passwords. Add it to `.gitignore` and ship a `deploy-config.example.json` with placeholder values instead.
-
-### App Constants
-
-Mendix app constants (defined in Studio Pro) are automatically extracted from the PAD package during deployment. The deploy script:
-
-1. Parses `etc/constants/defaults.conf` and `etc/constants/variables.conf` inside the PAD
-2. Generates (or updates) a `deploy-config-constants.json` file alongside the script
-3. Pre-fills values from PAD defaults; leaves empty strings for constants that need user input
-4. Prompts the user to fill in missing values before proceeding
-5. Creates/updates Snowflake `GENERIC_STRING` SECRET objects (one per constant)
-6. Wires the secrets into the service spec as environment variables
-
-**First deploy with a new constant:**
-
-```
-[2/6] Configuring app constants...
-  Found 6 constant(s) in PAD
-  The following constants need values:
-    - MyFirstModule.Database_DBSource
-    - MyFirstModule.Database_DBUserName
-    - MyFirstModule.Database_DBPassword
-  Edit: C:\...\Deploy Script\deploy-config-constants.json
-  Fill in the values, save the file, then press Enter to continue
-```
-
-Edit the file, fill in values, save, press Enter. The script handles the rest.
-
-**Subsequent deploys:** If `deploy-config-constants.json` already has all values filled, the script proceeds without prompting.
-
-**Adding a new constant in Studio Pro:** Just add it, export a new PAD, and redeploy. The script detects the new constant, adds it to the config file, and prompts for its value.
-
-**Rotating a secret value:** Edit `deploy-config-constants.json` with the new value and redeploy. The script runs `CREATE OR REPLACE SECRET` which updates the value in Snowflake. Note: since secrets are mounted as environment variables (not files), the container must restart for the new value to take effect. The ALTER SERVICE during deploy handles this.
-
-**Naming convention:** Secret objects are created in the same database/schema as the service, named `MX_CONST_<MODULE>_<CONSTANTNAME>` (uppercased, dots replaced by underscores).
-
-**Security note:** `deploy-config-constants.json` contains secret values (PATs, passwords). It is gitignored alongside `deploy-config.json`.
-
----
-
-The public endpoint URL contains a hash that is assigned at service creation time. Dropping and recreating the service generates a new hash (new URL). Suspending, resuming, or altering the spec in-place preserves the URL.
-
-| Operation | URL preserved? | Use when |
-|-----------|---------------|----------|
-| `ALTER SERVICE ... FROM SPECIFICATION $$...$$` | Yes | Changing env vars, images, resources, probes |
-| `ALTER SERVICE ... SUSPEND` / `RESUME` | Yes | Pausing to save credits |
-| `ALTER SERVICE ... SET EXTERNAL_ACCESS_INTEGRATIONS = (...)` | Yes | Adding/changing egress rules |
-| `DROP SERVICE` + `CREATE SERVICE` | **No** (new URL) | Only when you need a completely fresh start |
-
-**Update the spec (preserves endpoint):**
+The `controllerPat` is used by `upload-pad.ps1` to authenticate against the controller's public endpoint. Generate it:
 
 ```sql
-ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE
-  FROM SPECIFICATION $$
-  ... updated spec here ...
-$$;
+ALTER USER <you> ADD PROGRAMMATIC ACCESS TOKEN mendix_deploy_controller_pat
+  ROLE_RESTRICTION = 'MENDIX_DEPLOY_CONTROLLER_ROLE'
+  DAYS_TO_EXPIRY = 90;
 ```
 
-**Suspend/resume (preserves endpoint and local volume data):**
+Copy the token value from the output.
 
-```sql
-ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE SUSPEND;
-ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE RESUME;
+**Run the setup script:**
+
+```powershell
+.\Controller\setup.ps1 -Config .\Controller\controller-config.json
 ```
 
-**Scheduled suspend for demos/POC (optional, saves credits outside office hours):**
+This creates:
+- `MENDIX_DEPLOY_CONTROLLER_ROLE` (with the minimum grants needed)
+- `MENDIX_DEPLOY_STAGE` (Snowflake stage for PAD zip uploads)
+- `MENDIX_APPS` table (app registry)
+- `CTRL_PG_HOST` and `CTRL_PG_PASS` secrets (controller's Postgres credentials)
+- `MENDIX_DEPLOY_CONTROLLER` service
 
-SPCS services with public endpoints do not auto-suspend on inactivity. For demos or POC environments that don't need 24/7 uptime, create scheduled tasks to suspend outside office hours:
+**Build and push the controller image:**
 
-```sql
--- Suspend at 6 PM UK time on weekdays
-CREATE TASK <DATABASE>.<SCHEMA>.SUSPEND_MENDIX_EVENING
-  SCHEDULE = 'USING CRON 0 18 * * 1-5 Europe/London'
-  ALLOW_OVERLAPPING_EXECUTION = FALSE
-AS ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE SUSPEND;
+```powershell
+cd Controller
 
--- Resume at 8 AM UK time on weekdays
-CREATE TASK <DATABASE>.<SCHEMA>.RESUME_MENDIX_MORNING
-  SCHEDULE = 'USING CRON 0 8 * * 1-5 Europe/London'
-  ALLOW_OVERLAPPING_EXECUTION = FALSE
-AS ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE RESUME;
+snow spcs image-registry login --connection mendix
+$registry = "$(snow spcs image-registry url --connection mendix)"
+$repo = "$registry/<database>/<schema>/<image_repo>"
 
--- Enable the tasks (created suspended by default)
-ALTER TASK <DATABASE>.<SCHEMA>.SUSPEND_MENDIX_EVENING RESUME;
-ALTER TASK <DATABASE>.<SCHEMA>.RESUME_MENDIX_MORNING RESUME;
+docker build -t mendix-deploy-controller .
+docker tag mendix-deploy-controller "$repo/mendix-deploy-controller:latest"
+docker push "$repo/mendix-deploy-controller:latest"
 ```
 
-The service stays suspended on weekends and evenings. If someone needs access outside these hours, a manual `ALTER SERVICE ... RESUME` or hitting the endpoint (with `AUTO_RESUME = TRUE` on the compute pool) will bring it back in ~2 minutes.
-```sql
-DROP SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE;
-CREATE SERVICE ... ;
+Wait for the controller to reach RUNNING:
+
+```powershell
+& snow sql -q "SHOW SERVICES LIKE 'MENDIX_DEPLOY_CONTROLLER' IN SCHEMA <DATABASE>.<SCHEMA>;" `
+  --connection mendix --format json | ConvertFrom-Json | Select-Object name, status
+```
+
+The controller endpoint URL is your deployment API base URL. Retrieve it:
+
+```powershell
+& snow sql -q "SHOW ENDPOINTS IN SERVICE <DATABASE>.<SCHEMA>.MENDIX_DEPLOY_CONTROLLER;" `
+  --connection mendix --format json | ConvertFrom-Json | Select-Object name, ingress_url
 ```
 
 ---
 
-## Troubleshooting
+## Deploying a New App
 
-| Problem | Solution |
-|---------|----------|
-| `404 Not Found` on CLI login | Add region to account: `<ACCOUNT_LOCATOR>.<REGION>` |
-| `Connection X is not configured` | Check you're editing `connections.toml` (not `config.toml`) and section name matches |
-| `Authorization Failure` on docker push | Logout/login with correct hostname (hyphens) and correct role |
-| `Splatting operator @` PowerShell error | Wrap stage paths in quotes: `'@STAGE_NAME'` |
-| `Network policy is required` on Docker push or CLI | The Snowflake registry requires an account-level network policy to exist. Create a permissive one: `CREATE NETWORK POLICY ALLOW_ALL_POLICY ALLOWED_IP_LIST = ('0.0.0.0/0'); ALTER ACCOUNT SET NETWORK_POLICY = ALLOW_ALL_POLICY;` Do NOT use a restrictive single-IP policy or you'll get locked out when your IP changes. |
-| Readiness probe permanently failing on port 8090 | Admin port binds to `localhost` and is not configurable in PAD. Use port 8080 with path `/` instead |
-| Readiness probe failing for 2-3 minutes then succeeding | Normal; Mendix PAD takes 2-3 minutes to initialize. Wait before investigating |
-| `unknown option secretKeyRef` | Use flat format: `snowflakeSecret: name` not nested `objectName` |
-| `stage name must start with @` | Prefix stage name with `@` in volume config |
-| `invalid value ... for 'volumes[0].stageConfig.name'` | Stage name must be **fully qualified**: `"@DATABASE.SCHEMA.STAGE_NAME"` |
-| App starts but uses HSQLDB instead of PostgreSQL | Env var name is wrong. Use `RUNTIME_PARAMS_DATABASETYPE` (no underscore between DATABASE and TYPE). Check `etc/variables.conf` for correct names |
-| File storage path shows `/mendix/app/./data/files` | Wrong env var. Use `RUNTIME_PARAMS_UPLOADEDFILESPATH`, not `MXRUNTIME_com_mendix_storage_localfilesystem_Location` |
-| Storage service setting ignored | Use `RUNTIME_PARAMS_COM_MENDIX_CORE_STORAGESERVICE`, not `MXRUNTIME_com_mendix_core_StorageService` (PAD does not use `MXRUNTIME_` prefix format) |
-| MxAdmin login says "incorrect password" | You need `RUNTIME_ADMINUSER_PASSWORD` (creates the app user), not just `M2EE_ADMIN_PASS` (admin API only). Check logs for "MxAdmin user with username 'MxAdmin' does not exist!" |
-| Docker pipe error: `open //./pipe/docker_engine: The system cannot find the file specified` | Rancher Desktop's WSL2 backend lost the pipe. Run `wsl --shutdown`, then relaunch Rancher Desktop. |
-| Pushed new image but service still runs old code after suspend/resume | SPCS **pins the image SHA256 digest** at service creation time. Suspend/resume re-pulls the same pinned digest, NOT the current `:latest` tag. Fix: use `ALTER SERVICE ... FROM SPECIFICATION $$...$$` which re-resolves the tag. The deploy script does this automatically. If you need a manual fix: `DROP SERVICE` + `CREATE SERVICE` (changes URL). |
-| `The given member name 'X' has no corresponding member` in Java action | Mendix associations require fully-qualified names: `"System.UserRoles"` not `"UserRoles"`. Attributes use simple names (`"Name"`, `"Password"`). Use `getMember("Module.AssociationName")` cast to `MendixObjectReferenceSet` and call `addValue()` for many-to-many. |
+### Step 1: Prepare an App Config
+
+Create a JSON file **outside the repo** (it contains credentials):
+
+```json
+{
+  "pg_database":       "<app-database-name>",
+  "admin_password":    "<mendix-admin-password>",
+  "resource_tier":     "medium",
+  "use_caller_rights": true,
+  "constants": {
+    "Module.ConstantName": "value",
+    "ExternalDatabaseConnector.LogNode": "ExternalDatabaseConnector"
+  }
+}
+```
+
+`resource_tier` options: `"small"`, `"medium"`, `"large"` — maps to different CPU/memory limits.
+
+`use_caller_rights: true` enables SPCS caller's rights (the container can query Snowflake as the logged-in user). See the Caller's Rights section below.
+
+For constants that reference the Snowflake internal hostname (JDBC URLs), use the `{SNOWFLAKE_HOST}` placeholder — the base image entrypoint resolves it at container startup:
+
+```json
+"MyFirstModule.SnowflakeDB_DBSource": "jdbc:snowflake://{SNOWFLAKE_HOST}/?db=MY_DB&schema=MY_SCHEMA&warehouse=COMPUTE_WH&authenticator=oauth&JDBC_QUERY_RESULT_FORMAT=JSON"
+```
+
+### Step 2: Export a PAD from Studio Pro
+
+App menu > Create Portable App Distribution > select the target.
+
+The exported `.zip` file is the PAD.
+
+### Step 3: Run `upload-pad.ps1`
+
+```powershell
+.\Controller\upload-pad.ps1 `
+  -AppName "my-app" `
+  -PadPath "C:\path\to\MyApp_portable_20261201_1200.zip" `
+  -ControllerUrl "https://<controller-ingress>.snowflakecomputing.app" `
+  -Token "<controllerPat from controller-config.json>" `
+  -Config ".\Controller\controller-config.json" `
+  -AppConfig "C:\path\to\my-app-controller-config.json"
+```
+
+`-AppConfig` is required on first deploy (registers the app). Omit it on subsequent deploys.
+
+The script does four things:
+
+1. **Registers the app** (`POST /apps`) — creates the SPCS service, filestorage stage, and secrets. Returns 409 if already registered (safe to retry).
+2. **Uploads the PAD** to Snowflake stage via `snow stage copy` — bypasses the SPCS ingress timeout entirely.
+3. **Triggers deploy** (`POST /apps/{name}/trigger-deploy`) — returns 202 immediately; the controller runs the deploy in a background thread.
+4. **Polls** `GET /apps/{name}` every 10 seconds until `last_deploy_status` is `READY` or `FAILED`.
+
+The deploy process (server-side, asynchronous):
+- Parses the PAD zip for constant definitions
+- Validates all constants have values (fails fast with 422 if not)
+- Syncs secret values if constants changed
+- Calls `ALTER SERVICE FROM SPECIFICATION` (if constants changed) or `SUSPEND` + `RESUME` (if not)
+- Polls SPCS until the service reaches RUNNING
+- Updates the registry with READY status and the endpoint URL
+
+**Startup time:** Mendix apps take 3-5 minutes to fully initialize (PAD extraction, DB schema sync, model initialization). The readiness probe failing during this window is normal.
 
 ---
 
-## Step 8: Set Up the SnowflakeSSO Module
+## Deploying a New Version
 
-The SnowflakeSSO module handles automatic user login via Snowflake identity and stores the caller token needed for querying Snowflake data.
+The SPCS service endpoint URL is preserved across all updates.
 
-**Setup steps in Studio Pro:**
+```powershell
+.\Controller\upload-pad.ps1 `
+  -AppName "my-app" `
+  -PadPath "C:\path\to\MyApp_portable_20261215_0900.zip" `
+  -ControllerUrl "https://<controller-ingress>.snowflakecomputing.app" `
+  -Token "<controllerPat>" `
+  -Config ".\Controller\controller-config.json"
+```
 
-1. **Import the module:** Import `App Components/SnowflakeSSO.mpk` into your project (right-click your project in the App Explorer, Import Module Package)
-2. **Replace the login page:** Copy `App Components/login.html` to your project's `theme/web/` folder, replacing the default login page. This page redirects unauthenticated users through the `/headersso/` endpoint.
-3. **Add the token refresh snippet:** Drag `Snippet_TriggerSFTokenRefresh` from the SnowflakeSSO module into your app's **Main Layout** (the layout that wraps all pages). This keeps the caller token fresh via periodic JS calls.
-4. **Register the SSO handler at startup:** Set `SnowflakeSSO.ASu_RegisterSnowflakeSSO` as your project's After Startup microflow (Project Settings > Runtime > After Startup). If you already have an after-startup microflow, call this one from it as a sub-microflow.
-5. **Map the module role:** In Project Security > User Roles, map the `SnowflakeSSO.User` module role to every user role that should be able to log in via Snowflake SSO (typically all of them). Without this mapping, users will authenticate through Snowflake but won't have permission to access the SSO module's entities and microflows.
+No `-AppConfig` needed — the app is already registered.
 
-**Security warning:** The `CallerToken` attribute on `SnowflakeSSO.SnowflakeUser` must never be readable by user roles. The module ships with entity access rules that restrict it to system context only. Do not modify these access rules. If the token were exposed to the client, it could be combined with the service token (available inside the container) to impersonate the user.
+If the new PAD introduces constants that weren't in the registry, the deploy returns 422 with a list of missing constants. Update the app's constants first:
+
+```powershell
+$headers = @{ Authorization = "Snowflake Token=`"<controllerPat>`"" }
+$body = @{ constants = @{ "Module.NewConstant" = "value" } } | ConvertTo-Json
+Invoke-RestMethod -Uri "https://<controller-url>/apps/my-app/constants" `
+  -Method Put -Headers $headers -ContentType "application/json" -Body $body
+```
+
+Then re-run `upload-pad.ps1`.
 
 ---
 
-## Querying Snowflake as the End User (Caller's Rights)
+## App Constants
 
-The service spec includes `executeAsCaller: true` in the `capabilities` block. This causes SPCS to inject a `Sf-Context-Current-User-Token` header on every ingress request, which represents the logged-in user's identity.
+Constants from Studio Pro are stored as Snowflake `GENERIC_STRING` secrets, one per constant. The controller manages them.
 
-**How it works:**
+**Naming convention:** secret name = `MX_CONST_<MODULE>_<CONSTANTNAME>` (uppercase, dots replaced by underscores). Example: `ExternalDatabaseConnector.LogNode` → `MX_CONST_EXTERNALDATABASECONNECTOR_LOGNODE`.
 
-1. User logs in via `/headersso/` (Snowflake OAuth gate on the SPCS endpoint)
-2. `HeaderSSOHandler` reads `Sf-Context-Current-User-Token` and stores it on the `SnowflakeSSO.SnowflakeUser` entity
-3. A JS keepalive (`Snippet_TriggerSFTokenRefresh`, must be added to your Main Layout) pings `/headersso/refresh` every 20 minutes to keep the token fresh
-4. When a microflow needs to query Snowflake as the user, it calls `GetCompoundToken` which:
-   - Reads the service OAuth token from `/snowflake/session/token` (auto-refreshed by SPCS)
-   - Reads the user's caller token from the entity
-   - Returns the concatenation: `<service-token>.<user-token>`
-5. In the microflow's `ExecuteQuery` action, override username with `$SnowflakeUser/Name` and password with the compound token
+**How they reach the container:** The base image `entrypoint.sh` reads `etc/constants/variables.conf` from the extracted PAD to find the env var name for each constant, then reads the corresponding secret from `/secrets/<secret_dir>/secret_string` and exports it as an env var.
 
-**One-time SQL setup (run as ACCOUNTADMIN):**
+**Updating a constant without a new PAD:**
+
+```powershell
+$headers = @{ Authorization = "Snowflake Token=`"<controllerPat>`"" }
+$body = @{ constants = @{ "Module.ConstantName" = "new-value" } } | ConvertTo-Json
+Invoke-RestMethod -Uri "https://<controller-url>/apps/my-app/constants" `
+  -Method Put -Headers $headers -ContentType "application/json" -Body $body
+```
+
+This updates the secret in Snowflake, alters the service spec to restart the container, and polls for RUNNING.
+
+---
+
+## Caller's Rights (Querying Snowflake as the End User)
+
+When `use_caller_rights: true`, SPCS injects a user identity token into every ingress request via the `Sf-Context-Current-User-Token` header. The SnowflakeSSO module captures this and enables querying Snowflake as the logged-in user.
+
+### One-Time SQL Setup
+
+Run as ACCOUNTADMIN after the service is running:
 
 ```sql
--- Extend caller token validity to 30 minutes (default is 2 min, max 7 days)
-ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_SERVICE
+-- Extend caller token validity (default is 2 min; max 7 days)
+ALTER SERVICE <DATABASE>.<SCHEMA>.<APP>_SERVICE
   SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
+```
 
--- Grant caller grants to the service owner role
--- These allow the service to perform operations ON BEHALF of the caller
--- The caller must ALSO have these privileges via their own role
+The controller runs this automatically when `use_caller_rights: true` and the service is first created.
+
+**Grant the service permission to act on behalf of callers:**
+
+```sql
+-- For each Snowflake database/schema/warehouse the app needs to query:
 GRANT CALLER USAGE ON DATABASE <target_db> TO ROLE <service_owner_role>;
 GRANT INHERITED CALLER USAGE ON ALL SCHEMAS IN DATABASE <target_db> TO ROLE <service_owner_role>;
 GRANT INHERITED CALLER SELECT ON ALL TABLES IN DATABASE <target_db> TO ROLE <service_owner_role>;
 GRANT CALLER USAGE ON WAREHOUSE <warehouse> TO ROLE <service_owner_role>;
 
--- Ensure end users have secondary roles active (for cross-role access)
+-- End users must have secondary roles active for cross-role access:
 ALTER USER <username> SET DEFAULT_SECONDARY_ROLES = ('ALL');
 ```
 
-### Understanding Caller Grants
+Caller's rights uses two-layer permission checks: both the user AND the service owner role must have the privilege. If a user gets "Object does not exist or not authorized" for a table they can clearly see in Snowsight, the `GRANT INHERITED CALLER SELECT` is missing for that object.
 
-Caller's rights in SPCS uses **restricted caller's rights**: both the user AND the service owner role must be authorized. This is a two-layer permission check:
+### SnowflakeSSO Module Setup
 
-1. The user's own role must have the privilege (e.g., SELECT on a table)
-2. The service owner role must have a **caller grant** for that same privilege
+1. Import `App Components/SnowflakeSSO.mpk` into your Studio Pro project
+2. Copy `App Components/login.html` to `theme/web/` (replaces default login page with Snowflake SSO redirect)
+3. Add `Snippet_TriggerSFTokenRefresh` to your Main Layout (keeps the caller token fresh)
+4. Set `SnowflakeSSO.ASu_RegisterSnowflakeSSO` as the project's After Startup microflow
+5. Map the `SnowflakeSSO.User` module role to all user roles that can log in
 
-If either is missing, the query fails with "does not exist or not authorized."
+**Querying Snowflake in a microflow:**
+1. Retrieve `SnowflakeSSO.SnowflakeUser` for the current user
+2. Call `GetCompoundToken` Java action → `$Token`
+3. In `ExecuteQuery`: username override = `$SnowflakeUser/Name`, password override = `$Token`
 
-**Why this exists:** It prevents a service from accessing data on behalf of a user that the service developer didn't intend. The service owner explicitly declares which objects the service is allowed to touch.
+The compound token (`<service-token>.<caller-token>`) authenticates via OAuth over the internal Snowflake network. No EAI needed for this path.
 
-**Grant patterns by use case:**
+### JDBC Connection URL
 
-```sql
--- Allow callers to query all tables in a specific schema
-GRANT CALLER USAGE ON DATABASE my_db TO ROLE <service_owner_role>;
-GRANT CALLER USAGE ON SCHEMA my_db.my_schema TO ROLE <service_owner_role>;
-GRANT INHERITED CALLER SELECT ON ALL TABLES IN SCHEMA my_db.my_schema TO ROLE <service_owner_role>;
+The External Database Connector uses a JDBC URL. The Snowflake internal hostname is available as `$SNOWFLAKE_HOST` (SPCS-injected env var). Use the `{SNOWFLAKE_HOST}` placeholder in the constant:
 
--- Allow callers to query all tables in an entire database
-GRANT CALLER USAGE ON DATABASE my_db TO ROLE <service_owner_role>;
-GRANT INHERITED CALLER USAGE ON ALL SCHEMAS IN DATABASE my_db TO ROLE <service_owner_role>;
-GRANT INHERITED CALLER SELECT ON ALL TABLES IN DATABASE my_db TO ROLE <service_owner_role>;
-
--- Allow callers to use a warehouse (required for any query execution)
-GRANT CALLER USAGE ON WAREHOUSE my_wh TO ROLE <service_owner_role>;
-
--- Allow callers to query views
-GRANT INHERITED CALLER SELECT ON ALL VIEWS IN SCHEMA my_db.my_schema TO ROLE <service_owner_role>;
+```
+jdbc:snowflake://{SNOWFLAKE_HOST}/?db=MY_DB&schema=MY_SCHEMA&warehouse=COMPUTE_WH&authenticator=oauth&JDBC_QUERY_RESULT_FORMAT=JSON
 ```
 
-**Common error:** `Object 'DB.SCHEMA.TABLE' does not exist or not authorized` when the user clearly has access. This means the caller grant is missing on the service owner role. Run the appropriate `GRANT CALLER` / `GRANT INHERITED CALLER` statement.
-
-**The deploy script** includes an optional post-deploy step that offers to run these grants interactively. You can also run them manually at any time.
-
-### JDBC Connection from SPCS
-
-SPCS provides every container with a `SNOWFLAKE_HOST` environment variable containing the internal hostname for connecting to Snowflake. You must use this variable; hardcoding a hostname (including `snowflake.snowflakecomputing.internal`) will not work.
-
-The deploy script handles this automatically through an entrypoint mechanism:
-
-1. The `Database_DBSource` constant in `deploy-config-constants.json` uses a placeholder: `jdbc:snowflake://{SNOWFLAKE_HOST}/?db=<YOUR_DB>&schema=<YOUR_SCHEMA>&warehouse=<YOUR_WH>&authenticator=oauth&JDBC_QUERY_RESULT_FORMAT=JSON`
-2. The Docker image includes an `entrypoint.sh` that scans all `CONSTANTS_*` env vars for `{SNOWFLAKE_HOST}` and replaces it with the actual value from the SPCS-provided environment variable
-3. The Mendix runtime starts after this substitution, so it receives a fully resolved JDBC URL
-
-**What to put in `deploy-config-constants.json`:**
-
-```json
-{
-  "constants": {
-    "MyFirstModule.Database_DBSource": "jdbc:snowflake://{SNOWFLAKE_HOST}/?db=MY_DATABASE&schema=MY_SCHEMA&warehouse=MY_WH&authenticator=oauth&JDBC_QUERY_RESULT_FORMAT=JSON",
-    "MyFirstModule.Database_DBUserName": "OVERRIDE_AT_RUNTIME",
-    "MyFirstModule.Database_DBPassword": "OVERRIDE_AT_RUNTIME"
-  }
-}
-```
-
-The `DBUserName` and `DBPassword` constants should be set to a placeholder value (e.g., `OVERRIDE_AT_RUNTIME`). They are overridden at query time in the microflow, but the deploy script requires all constants to have non-empty values.
-
-### Design-Time vs Runtime Configuration
-
-The External Database Connector requires valid constant values to initialize in Studio Pro. These are different from what runs on SPCS:
-
-| Setting | Studio Pro (local dev) | SPCS (deployed) |
-|---------|----------------------|-----------------|
-| `Database_DBSource` | `jdbc:snowflake://<account>.snowflakecomputing.com/?db=...&warehouse=...` | `jdbc:snowflake://{SNOWFLAKE_HOST}/?...&authenticator=oauth&...` (resolved by entrypoint) |
-| `Database_DBUserName` | Your Snowflake username | Overridden per-request in microflow |
-| `Database_DBPassword` | A PAT or your password | Overridden per-request with compound token |
-| Authenticator | Not needed (defaults to snowflake) | `authenticator=oauth` in the URL |
-
-The deploy script manages the SPCS values via `deploy-config-constants.json`. Your Studio Pro project keeps its own local constant values for development. These two never conflict because the PAD export captures the Studio Pro defaults, but the SPCS secrets override them at runtime.
-
-### Querying Snowflake in a Microflow
-
-At query time, you must override the username and password with the caller's identity. The External Database Connector's `ExecuteQuery` action accepts override parameters.
-
-**Microflow pattern:**
-
-1. Retrieve `SnowflakeSSO.SnowflakeUser` where `id = $currentUser` to get the user object
-2. Call the `GetCompoundToken` Java action. Store the result in a variable (e.g., `$Token`)
-3. In the `ExecuteQuery` action parameters:
-   - **Username override**: `$SnowflakeUser/Name` (the Snowflake username, e.g., `JANE_DOE`)
-   - **Password override**: `$Token` (the compound token)
-   - **SQL**: Your query
-
-Each query executes as the logged-in user with their Snowflake roles and permissions. The compound token (`serviceToken.callerToken`) authenticates via OAuth over the internal Snowflake network; no EAI or external egress is needed.
-
-### Token Refresh Setup (Required)
-
-Add the **`Snippet_TriggerSFTokenRefresh`** snippet from the SnowflakeSSO module to your app's **Main Layout** (the layout used by all pages). This snippet contains a JavaScript action that periodically calls `/headersso/refresh` to update the caller token stored on the user entity.
-
-Without this snippet, the caller token expires after 30 minutes (the `SERVICE_CALLER_TOKEN_VALIDITY_SECS` value). After expiry, all Snowflake queries will fail with authentication errors until the user logs out and back in.
-
-**Token lifecycle:**
-
-| Token | Source | Validity | Refresh mechanism |
-|-------|--------|----------|-------------------|
-| Service token | `/snowflake/session/token` (file, SPCS-managed) | ~1 hour, auto-refreshed every few minutes | Read on demand from disk |
-| Caller token | `Sf-Context-Current-User-Token` header | 30 min (configured above) | JS keepalive every 20 min via `/headersso/refresh` |
-| Compound token | Concatenation of both | Limited by the shorter-lived token | Built on demand by `GetCompoundToken` |
-
-**Security:**
-- Entity access rules on `SnowflakeUser.CallerToken` deny read/write for all user roles; only system context can access it
-- The caller token alone is useless; it requires the service token (container-local file) to form a valid credential
-- The Postgres database is network-isolated (only reachable from the SPCS container)
-- 30-minute expiry limits the blast radius if a token is exposed
-
-**Verifying it works:**
-
-To verify caller's rights is working, use the External Database Connector with the compound token to run:
-```sql
-SELECT CURRENT_USER(), CURRENT_ROLE();
-```
-The result should show the logged-in user's name, not the service user (`MENDIX_SERVICE`).
+The `entrypoint.sh` replaces `{SNOWFLAKE_HOST}` before the Mendix runtime starts. Set `DBUserName` and `DBPassword` constants to `PLACEHOLDER` — they are overridden per-query in the microflow with the compound token.
 
 ---
 
-## Architecture (POC)
+## Updating the Controller
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  SPCS Service: MENDIX_SERVICE                                 │
-│  Compute Pool: MENDIX_POC_POOL (CPU_X64_S)                   │
-│                                                               │
-│  ┌─────────────────────┐                                      │
-│  │  mendix-app          │──── EAI ──── Snowflake Postgres     │
-│  │  Port 8080 (app)     │             (managed, persistent)   │
-│  │  Port 8090 (admin)   │                                     │
-│  │  Storage: stage vol   │── internal ── Snowflake            │
-│  └─────────────────────┘   (SNOWFLAKE_HOST, OAuth)            │
-│                                                               │
-│  Endpoint: mendix-web (public, Snowflake auth)                │
-└───────────────────────────────────────────────────────────────┘
-```
-
-**Notes:**
-- Trial license has user and time limits
-- SPCS egress IP ranges expire periodically; monitor and update the Postgres network rule
-
----
-
-## Deploying Multiple Apps
-
-The deploy script supports running multiple Mendix apps on shared infrastructure. Each app gets its own service, database, file stage, and Docker image, while sharing the compute pool, Postgres instance, EAI, and image registry.
-
-See `multi-app-architecture.md` for the full decision rationale.
-
-### One-Time Setup (Per Postgres Instance)
-
-Grant CREATEDB to the `application` user so the entrypoint script can auto-create databases:
-
-```sql
--- Connect to MENDIX_PG as the admin user (credentials from CREATE POSTGRES INSTANCE output)
--- via psql from a whitelisted IP or SPCS container:
-ALTER USER application CREATEDB;
-```
-
-### Deploying a New App
-
-1. **Export PAD** from Studio Pro (App menu > Create Portable App Distribution)
-
-2. **Create a config** in your app's project directory. Copy `deploy-config.example.json` from the Deploy Script folder and customize:
-   - `service.name`: unique service name (e.g., `DB.SCHEMA.MY_APP_SERVICE`)
-   - `service.imageName`: unique image name (e.g., `mendix-my-app`)
-   - `database.name`: unique database name (e.g., `my_app`) -- will be auto-created on first boot
-   - `mendix.fileStorageStage`: unique stage (e.g., `@DB.SCHEMA.MY_APP_FILESTORAGE_STAGE`) -- auto-created by script
-
-3. **Run the deploy script** from your app's project directory:
+When controller code changes (changes to `Controller/app/`), rebuild and push the controller image, then force an image refresh:
 
 ```powershell
-& "C:\path\to\Deploy Script\deploy.ps1" -PadPath ".\releases\MyApp_portable.zip"
+cd Controller
+
+snow spcs image-registry login --connection mendix
+$registry = "$(snow spcs image-registry url --connection mendix)"
+$repo = "$registry/<database>/<schema>/<image_repo>"
+
+docker build -t mendix-deploy-controller .
+docker tag mendix-deploy-controller "$repo/mendix-deploy-controller:latest"
+docker push "$repo/mendix-deploy-controller:latest"
 ```
 
-The script will:
-- Create the file storage stage if it doesn't exist
-- Detect that the service doesn't exist and CREATE it (with compute pool, EAI)
-- Build and push the Docker image
-- On first boot, the container entrypoint creates the PG database automatically
+Then force the controller to pull the new image (SPCS pins the digest at start; `ALTER SERVICE FROM SPECIFICATION` re-resolves `:latest`):
 
-4. **Subsequent deploys** of the same app just update the existing service (ALTER SERVICE).
+```powershell
+& snow sql -f Controller/sql/setup.sql --connection mendix
+```
 
-### What Each App Needs (Unique)
-
-| Resource | Naming Pattern | Example |
-|----------|---------------|---------|
-| Service | `DB.SCHEMA.<APP>_SERVICE` | `YOUR_DB.PUBLIC.MANUFACTURING_SERVICE` |
-| Image | `mendix-<app>` | `mendix-manufacturing` |
-| PG Database | `<app_name>` | `manufacturing` |
-| File Stage | `@DB.SCHEMA.<APP>_FILESTORAGE_STAGE` | `@YOUR_DB.PUBLIC.MFG_FILESTORAGE_STAGE` |
-| Config File | `deploy-config.json` (in app's project dir) | per-app |
-
-### What's Shared
-
-| Resource | Name | Notes |
-|----------|------|-------|
-| Compute Pool | `MENDIX_POC_POOL` | All services run here; increase MAX_NODES for more capacity |
-| Postgres Instance | `MENDIX_PG` | One instance, multiple databases |
-| EAI | `MENDIX_PG_EAI` | Shared egress rules (same SPCS IPs) |
-| Image Registry | `db/schema/poc_repo` | Shared repo, different image names |
+Or run just the `ALTER SERVICE` portion manually. Wait for `MENDIX_DEPLOY_CONTROLLER` to return to RUNNING before deploying any apps.
 
 ---
 
-## Appendix: Container Internals
+## Scheduled Suspend / Resume (Optional)
 
-The deploy script generates two files in the PAD build context before building the Docker image:
+SPCS services with public endpoints do not auto-suspend. For POC environments:
 
-### Dockerfile
+```sql
+-- Suspend at 6 PM UK weekdays
+CREATE TASK <DATABASE>.<SCHEMA>.SUSPEND_CONTROLLER_EVENING
+  SCHEDULE = 'USING CRON 0 18 * * 1-5 Europe/London'
+  ALLOW_OVERLAPPING_EXECUTION = FALSE
+AS ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_DEPLOY_CONTROLLER SUSPEND;
 
-```dockerfile
-FROM eclipse-temurin:21-jdk
-WORKDIR /mendix
-COPY ./app ./app
-COPY ./bin ./bin
-COPY ./etc ./etc
-COPY ./lib ./lib
-ENV MX_LOG_LEVEL=info
-EXPOSE 8080 8090
-COPY entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
-CMD ["./entrypoint.sh"]
+-- Resume at 8 AM UK weekdays
+CREATE TASK <DATABASE>.<SCHEMA>.RESUME_CONTROLLER_MORNING
+  SCHEDULE = 'USING CRON 0 8 * * 1-5 Europe/London'
+  ALLOW_OVERLAPPING_EXECUTION = FALSE
+AS ALTER SERVICE <DATABASE>.<SCHEMA>.MENDIX_DEPLOY_CONTROLLER RESUME;
+
+ALTER TASK <DATABASE>.<SCHEMA>.SUSPEND_CONTROLLER_EVENING RESUME;
+ALTER TASK <DATABASE>.<SCHEMA>.RESUME_CONTROLLER_MORNING RESUME;
 ```
 
-- Base image: Eclipse Temurin JDK 21 (required by Mendix 10.x/11.x PAD)
-- Copies the four PAD directories (`app`, `bin`, `etc`, `lib`) into the image
-- Port 8080: application web port (used for readiness probe and public endpoint)
-- Port 8090: admin API port (binds to localhost only; not reachable from SPCS probes)
-- Entrypoint: a shell script that resolves placeholders before launching the Mendix runtime
+Repeat for each app service. The compute pool will idle-suspend when all services are suspended (`AUTO_SUSPEND_SECS = 3600`).
 
-### entrypoint.sh
+---
 
-```bash
-#!/bin/bash
-# Resolve {SNOWFLAKE_HOST} placeholder in any CONSTANTS_* env vars
-for var in $(env | grep '^CONSTANTS_' | cut -d= -f1); do
-    val="${!var}"
-    if [[ "$val" == *"{SNOWFLAKE_HOST}"* ]]; then
-        export "$var"="${val//\{SNOWFLAKE_HOST\}/$SNOWFLAKE_HOST}"
-    fi
-done
-exec ./bin/start etc/Default
-```
+## Troubleshooting
 
-This script runs before the Mendix runtime starts. It scans all environment variables prefixed with `CONSTANTS_` (the Mendix constant overrides) and replaces any `{SNOWFLAKE_HOST}` placeholder with the actual value of `$SNOWFLAKE_HOST` (provided automatically by SPCS). This allows the JDBC connection URL to use the correct internal hostname without hardcoding it.
+| Problem | Cause / Fix |
+|---------|-------------|
+| `404 Not Found` on CLI login | Add region to account: `<LOCATOR>.<REGION>` (e.g., `xy12345.eu-west-2.aws`) |
+| `snow spcs image-registry login` returns 401 | Connection PAT has a role restriction that limits access. Use a PAT without restriction for Docker operations, or check that `connections.toml` has valid credentials. |
+| `push access denied` after successful login | Snowflake Docker registry tokens are short-lived. Run login and push in the same command (chain with `&&`). |
+| `upload-pad.ps1` returns 504 on trigger-deploy | Old controller image (pre-async fix). Rebuild and push the controller image, then ALTER SERVICE to refresh it. |
+| Service cycling PENDING → FAILED immediately | Check container logs: `snow sql -q "CALL SYSTEM\$GET_SERVICE_LOGS('<DB>.<SCHEMA>.<APP>_SERVICE', 0, 'mendix-app', 50);"` The most common cause is a missing or wrong secret value. |
+| "PAD not found at /mnt/deploy-stage/..." | Stage has a conflicting path. Check `LIST @MENDIX_DEPLOY_STAGE;` for `current.zip/<filename>` entries. Remove with `REMOVE @stage/path`. Run trigger-deploy again. |
+| Service fails after "Extracting PAD..." | psql auth failure in entrypoint (wrong PG password in `<APP>_PG_PASS` secret). Fix: `ALTER SECRET <DB>.<SCHEMA>.<APP>_PG_PASS SET SECRET_STRING = '<actual-pg-password>';` then trigger-deploy again. |
+| `ALTER SERVICE FROM SPECIFICATION` doesn't pick up new image | SPCS pins image SHA at service creation. `ALTER SERVICE FROM SPECIFICATION` re-resolves `:latest` tag. If still old: check that the push succeeded and the new digest is in the repo. |
+| Service RUNNING but app won't load (readiness timeout) | Mendix PAD apps take 3-5 minutes to initialize. Wait before investigating. Check logs for Java stack traces if it's been >10 minutes. |
+| MxAdmin login fails ("incorrect password") | `RUNTIME_ADMINUSER_PASSWORD` was not set. Supplied via the `admin_password` field in the app config JSON. |
+| "Object does not exist or not authorized" on Snowflake query | Caller grant missing. Run `GRANT INHERITED CALLER SELECT ON ALL TABLES IN ...` for the target database. |
+| Readiness probe failing permanently on port 8090 | Admin port binds to `localhost` and is unreachable by SPCS. Use port 8080 with path `/` — that's what the controller-generated spec does. |
+| `snow stage copy` creates `current.zip/<filename>` instead of overwriting | Happens when `current.zip` already exists as a file in the stage. The CLI treats it as a directory on subsequent runs. Fix: `REMOVE @stage/apps/<name>/current.zip/<filename>;` then re-upload. |
+| Controller API returns 401 | PAT expired or wrong. The `controllerPat` in `controller-config.json` has a 90-day default expiry. Generate a new one and update the config. |
+| New constant missing (422 on trigger-deploy) | PAD introduced a constant without a default and without a stored value. The error body lists the missing constant names. Register the values via `PUT /apps/{name}/constants` then retry. |
 
-After substitution, it executes the PAD startup script (`./bin/start etc/Default`) which initializes the Mendix runtime.
+---
+
+## Appendix: What `mendix-base` Contains
+
+The base image (`Mendix Base Image/Dockerfile`) is Eclipse Temurin JDK 21 plus `unzip` and `postgresql-client`. There is no Mendix app baked in. The `entrypoint.sh` at startup:
+
+1. Reads `$PAD_STAGE_PATH` and extracts the PAD zip to `/mendix-pad/`
+2. Reads file-based secrets from `/secrets/` and maps them to env vars:
+   - `pg_pass` → `RUNTIME_PARAMS_DATABASEPASSWORD`
+   - `admin_pass` → `M2EE_ADMIN_PASS` and `RUNTIME_ADMINUSER_PASSWORD`
+   - `mx_const_<module>_<name>` → the env var from the PAD's `variables.conf`
+3. Resolves `{SNOWFLAKE_HOST}` placeholder in any env var (for JDBC URLs)
+4. Auto-creates the Postgres database if it does not exist (using `psql`)
+5. Executes `/mendix-pad/bin/start /mendix-pad/etc/Default`
+
+App constants follow the HOCON naming in `etc/constants/variables.conf`. The variable name is case-sensitive and has no extra underscores between words (e.g., `RUNTIME_PARAMS_DATABASETYPE`, not `RUNTIME_PARAMS_DATABASE_TYPE`).
