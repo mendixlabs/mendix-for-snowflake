@@ -32,6 +32,11 @@ class UpdateConstantsRequest(BaseModel):
     constants: dict[str, str]
 
 
+class UpdateSpecRequest(BaseModel):
+    resource_tier: Optional[ResourceTier] = None
+    use_caller_rights: Optional[bool] = None
+
+
 class AppRecord(BaseModel):
     name: str
     service_name: str

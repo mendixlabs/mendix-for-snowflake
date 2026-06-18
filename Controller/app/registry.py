@@ -67,6 +67,7 @@ def list_apps() -> list[AppRecord]:
 _ALLOWED_UPDATE_COLUMNS = frozenset({
     "constants", "pad_stage_path", "endpoint_url",
     "last_deploy_status", "last_deployed_at",
+    "resource_tier", "use_caller_rights",
 })
 
 

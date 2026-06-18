@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,7 +15,7 @@ import yaml
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 
-from . import registry, snowflake_client as sf
+from . import activity, registry, snowflake_client as sf
 from .models import (
     AppRecord,
     AppStatusResponse,
@@ -24,17 +25,38 @@ from .models import (
     RESOURCE_TIERS,
     ResourceTier,
     UpdateConstantsRequest,
+    UpdateSpecRequest,
 )
 from .pad_parser import PadConstant, parse_from_zip
 
-app = FastAPI(title="Mendix SPCS Deployment Controller")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        activity.init_table()
+    except Exception:
+        logger.exception("Failed to initialise MENDIX_ACTIVITY")
+    yield
+
+
+app = FastAPI(title="Mendix SPCS Deployment Controller", lifespan=lifespan)
 
 
 @app.middleware("http")
 async def log_operator(request: Request, call_next):
     if request.method in ("POST", "PUT", "DELETE"):
         operator = request.headers.get("X-Operator", "<anonymous>")
+        action, app_name = activity.derive_action(request.method, request.url.path)
         logger.info("operator=%s %s %s", operator, request.method, request.url.path)
+        try:
+            activity.insert(
+                operator=operator,
+                action=action,
+                app_name=app_name,
+                detail={"path": request.url.path, "method": request.method},
+            )
+        except Exception:
+            logger.exception("Failed to record activity row")
     return await call_next(request)
 
 DB_SCHEMA = os.environ["DB_SCHEMA"]
@@ -406,6 +428,55 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
     background_tasks.add_task(_run_update_constants, name, record.service_name, merged, record, _constants_from_dict(merged))
     return {"status": "DEPLOYING"}
+
+
+def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
+                     new_caller: bool, caller_flipping_on: bool) -> None:
+    try:
+        constants_list = _constants_from_dict(record.constants or {})
+        spec = _build_spec(name, record.pg_database, new_tier, constants_list, new_caller)
+        sf.alter_service_spec(record.service_name, spec)
+        if caller_flipping_on:
+            sf.set_caller_token_validity(record.service_name, 1800)
+        if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+            return
+        registry.update_app(name, {
+            "resource_tier": str(new_tier.value) if hasattr(new_tier, "value") else str(new_tier),
+            "use_caller_rights": new_caller,
+            "last_deploy_status": "READY",
+        })
+    except Exception:
+        try:
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+        except Exception:
+            pass
+        logger.exception("Spec update failed for %s", name)
+
+
+@app.put("/apps/{name}/spec", status_code=202)
+def update_spec(name: str, req: UpdateSpecRequest, background_tasks: BackgroundTasks):
+    record = registry.get_app(name)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+    if req.resource_tier is None and req.use_caller_rights is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of resource_tier or use_caller_rights must be provided",
+        )
+
+    new_tier = req.resource_tier if req.resource_tier is not None else ResourceTier(record.resource_tier)
+    new_caller = req.use_caller_rights if req.use_caller_rights is not None else bool(record.use_caller_rights)
+    caller_flipping_on = (not record.use_caller_rights) and new_caller
+
+    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    background_tasks.add_task(_run_update_spec, name, record, new_tier, new_caller, caller_flipping_on)
+    return {"status": "DEPLOYING"}
+
+
+@app.get("/activity")
+def list_activity(app: Optional[str] = None, operator: Optional[str] = None, limit: int = 100):
+    return activity.query(app=app, operator=operator, limit=limit)
 
 
 def _run_suspend(name: str, service_name: str) -> None:

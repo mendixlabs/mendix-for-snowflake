@@ -78,6 +78,18 @@ class ControllerClient:
     def update_constants(self, name: str, constants: dict) -> dict:
         return self._request("PUT", f"/apps/{name}/constants", json={"constants": constants}).json()
 
+    def update_spec(self, name: str, payload: dict) -> dict:
+        return self._request("PUT", f"/apps/{name}/spec", json=payload).json()
+
+    def list_activity(self, app: str | None = None, operator: str | None = None,
+                      limit: int = 100) -> list[dict]:
+        params: dict = {"limit": limit}
+        if app:
+            params["app"] = app
+        if operator:
+            params["operator"] = operator
+        return self._request("GET", "/activity", params=params).json()
+
     def suspend(self, name: str) -> dict:
         return self._request("POST", f"/apps/{name}/suspend").json()
 

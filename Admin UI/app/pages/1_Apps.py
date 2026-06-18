@@ -231,6 +231,75 @@ def _detail_panel(selected_name: str) -> None:
             except ControllerError as e:
                 st.error(str(e))
 
+    with st.expander("Service spec"):
+        st.warning(
+            "Editing the spec restarts the service. Active end-user sessions on "
+            "this app will be dropped when the restart happens."
+        )
+
+        tier_options = ["small", "medium", "large"]
+        current_tier = record.get("resource_tier") or "medium"
+        new_tier = st.selectbox(
+            "Resource tier",
+            options=tier_options,
+            index=tier_options.index(current_tier) if current_tier in tier_options else 1,
+            key=f"spec-tier-{selected_name}",
+        )
+
+        current_caller = bool(record.get("use_caller_rights", False))
+        new_caller = st.checkbox(
+            "Enable caller's rights (executeAsCaller)",
+            value=current_caller,
+            key=f"spec-caller-{selected_name}",
+            help="When on, the service receives the operator's OAuth token on each request.",
+        )
+
+        tier_changed = new_tier != current_tier
+        caller_changed = new_caller != current_caller
+        spec_changed = tier_changed or caller_changed
+
+        if not spec_changed:
+            st.caption("No changes.")
+        else:
+            spec_diff: list[str] = []
+            if tier_changed:
+                spec_diff.append(f"- resource_tier: {current_tier}")
+                spec_diff.append(f"+ resource_tier: {new_tier}")
+            if caller_changed:
+                spec_diff.append(f"- use_caller_rights: {current_caller}")
+                spec_diff.append(f"+ use_caller_rights: {new_caller}")
+            st.caption("Pending changes:")
+            st.code("\n".join(spec_diff), language="diff")
+
+            if new_caller and not current_caller:
+                st.warning(
+                    "Turning caller's rights ON requires that operators' Snowflake "
+                    "roles hold the appropriate grants. Without them, in-app queries fail."
+                )
+
+            spec_confirm = st.text_input(
+                f"Type `{selected_name}` to confirm:",
+                key=f"spec-confirm-{selected_name}",
+            )
+            if st.button(
+                "Apply spec changes",
+                key=f"spec-apply-{selected_name}",
+                type="primary",
+                disabled=(spec_confirm != selected_name) or (deploy_status in _TRANSIENT),
+            ):
+                payload: dict = {}
+                if tier_changed:
+                    payload["resource_tier"] = new_tier
+                if caller_changed:
+                    payload["use_caller_rights"] = new_caller
+                try:
+                    client().update_spec(selected_name, payload)
+                    _refresh_now()
+                    st.success("Spec update triggered. Service will restart.")
+                    st.rerun()
+                except ControllerError as e:
+                    st.error(str(e))
+
 
 @st.fragment
 def _bulk_panel(names: list[str]) -> None:
