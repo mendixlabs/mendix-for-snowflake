@@ -174,10 +174,15 @@ $deadline = (Get-Date).AddMinutes(5)
 $url = $null
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 15
-    $raw = cmd /c "snow sql -q `"SHOW ENDPOINTS IN SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER;`" --connection $conn --format json --enable-templating NONE 2>&1"
-    if ($raw -match '"ingress_url"\s*:\s*"(https?://[^"]+)"') {
-        $url = $Matches[1]
-        break
+    # & snow ... | Out-String — avoid `cmd /c ... 2>&1`, which on PowerShell 5.1
+    # wraps each output line into an ErrorRecord and breaks multi-line regex.
+    $raw = (& snow sql -q "SHOW ENDPOINTS IN SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER;" --connection $conn --format json --enable-templating NONE) | Out-String
+    if ($raw -match '"ingress_url"\s*:\s*"([^"]+)"') {
+        $candidate = $Matches[1]
+        if ($candidate -notlike "*provisioning*") {
+            $url = if ($candidate -match '^https?://') { $candidate } else { "https://$candidate" }
+            break
+        }
     }
 }
 

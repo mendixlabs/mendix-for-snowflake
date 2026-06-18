@@ -94,7 +94,9 @@ $deadline = (Get-Date).AddMinutes(5)
 $ok = $false
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 10
-    $raw = cmd /c "snow sql -q `"DESCRIBE SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER;`" --connection $conn --format json --enable-templating NONE 2>&1"
+    # & snow ... | Out-String — avoid `cmd /c ... 2>&1`, which on PowerShell 5.1
+    # wraps each output line into an ErrorRecord and breaks multi-line regex.
+    $raw = (& snow sql -q "DESCRIBE SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER;" --connection $conn --format json --enable-templating NONE) | Out-String
     if ($raw -match '"status"\s*:\s*"RUNNING"') {
         if ($raw -match 'sha256:\s*"@sha256:(\w+)"') {
             Write-Host "  RUNNING, digest sha256:$($Matches[1].Substring(0,12))..." -ForegroundColor Green
