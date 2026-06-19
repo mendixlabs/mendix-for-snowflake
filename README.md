@@ -2,6 +2,22 @@
 
 Run Mendix applications natively on Snowflake using Snowpark Container Services (SPCS). No Mendix Cloud, no Kubernetes operator, no external infrastructure. The Mendix runtime runs as a container inside Snowflake, connected to a Snowflake-managed Postgres database, with file storage on Snowflake stages. Users authenticate via Snowflake identity and can query Snowflake data as themselves.
 
+## Screenshots
+
+The optional [Streamlit admin UI](#admin-ui-optional) manages apps from a browser, themed to Siemens iX:
+
+**Apps overview** — service and deploy status for every app you own, with refresh and bulk actions.
+
+![Admin UI — Apps overview](Screenshots/apps-overview.png)
+
+**Register a new app** — provisions the SPCS service, filestorage stage, and secrets; sets the owner role and resource tier.
+
+![Admin UI — Register a new app](Screenshots/register-new-app.png)
+
+**Service logs** — tail any app's logs, plus the controller's and admin UI's own logs for privileged operators.
+
+![Admin UI — Service logs](Screenshots/logs.png)
+
 ## What This Is
 
 A controller-based deployment toolkit for running Mendix apps on SPCS:
