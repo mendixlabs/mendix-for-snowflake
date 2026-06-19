@@ -75,7 +75,15 @@ spec:
     env:
       CONTROLLER_URL: $controllerUrl
       STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "1024"
-      STREAMLIT_THEME_PRIMARY_COLOR: "#006e93"
+      # iX Classic dark palette. Behind SPCS the app runs embedded, which defaults
+      # Streamlit to light regardless of OS, so we pin base=dark and supply the full
+      # palette here. This themes Streamlit's own widgets (branding.py only adds the
+      # font + Siemens Deep Blue logo backdrop). Keep in sync with update.ps1.
+      STREAMLIT_THEME_BASE: "dark"
+      STREAMLIT_THEME_PRIMARY_COLOR: "#00bde3"
+      STREAMLIT_THEME_BACKGROUND_COLOR: "#0f1619"
+      STREAMLIT_THEME_SECONDARY_BACKGROUND_COLOR: "#283236"
+      STREAMLIT_THEME_TEXT_COLOR: "#f5fcff"
     readinessProbe:
       port: 8501
       path: /_stcore/health

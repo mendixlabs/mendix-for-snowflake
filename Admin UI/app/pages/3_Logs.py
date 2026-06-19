@@ -52,15 +52,24 @@ def _scroll_script(is_first_render: bool) -> str:
     return f"""
     <script>
       const doc = window.parent.document;
-      const containers = doc.querySelectorAll('[data-testid="stVerticalBlockBorderWrapper"]');
-      if (containers.length) {{
-        const target = containers[containers.length - 1];
-        const isFirst = {first_js};
-        const atBottom = (target.scrollHeight - target.scrollTop - target.clientHeight) < 8;
-        if (isFirst || atBottom) {{
-          target.scrollTop = target.scrollHeight;
+      const snap = () => {{
+        const wraps = doc.querySelectorAll('[data-testid="stVerticalBlockBorderWrapper"]');
+        if (!wraps.length) return;
+        // The fixed-height container scrolls on the wrapper or an inner element;
+        // find the last actually-scrollable node so scrollTop lands.
+        let target = null;
+        for (let i = wraps.length - 1; i >= 0 && !target; i--) {{
+          const w = wraps[i];
+          if (w.scrollHeight > w.clientHeight + 4) target = w;
+          else target = [...w.querySelectorAll('*')].find(e => e.scrollHeight > e.clientHeight + 4);
         }}
-      }}
+        if (!target) target = wraps[wraps.length - 1];
+        const isFirst = {first_js};
+        const atBottom = (target.scrollHeight - target.scrollTop - target.clientHeight) < 40;
+        if (isFirst || atBottom) target.scrollTop = target.scrollHeight;
+      }};
+      // Defer past layout + syntax highlighting so scrollHeight is final.
+      requestAnimationFrame(() => requestAnimationFrame(snap));
     </script>
     """
 
