@@ -232,9 +232,9 @@ Copy the token value from the output.
 This creates:
 - `MENDIX_DEPLOY_CONTROLLER_ROLE` (with the minimum grants needed)
 - `MENDIX_DEPLOY_STAGE` (Snowflake stage for PAD zip uploads)
-- `MENDIX_APPS` table (app registry)
+- `MENDIX_APPS` table (app registry, including each app's `owner_role`)
 - `CTRL_PG_HOST` and `CTRL_PG_PASS` secrets (controller's Postgres credentials)
-- `MENDIX_DEPLOY_CONTROLLER` service
+- `MENDIX_DEPLOY_CONTROLLER` service (with `executeAsCaller: true` and a caller-token validity, used to resolve PAT callers' roles for authorization)
 
 **Build and push the controller image:**
 
@@ -278,6 +278,7 @@ Create a JSON file **outside the repo** (it contains credentials):
   "admin_password":    "<mendix-admin-password>",
   "resource_tier":     "medium",
   "use_caller_rights": true,
+  "owner_role":        "MENDIX_ADMIN_OPERATOR_ROLE",
   "constants": {
     "Module.ConstantName": "value",
     "ExternalDatabaseConnector.LogNode": "ExternalDatabaseConnector"
@@ -288,6 +289,8 @@ Create a JSON file **outside the repo** (it contains credentials):
 `resource_tier` options: `"small"`, `"medium"`, `"large"` — maps to different CPU/memory limits.
 
 `use_caller_rights: true` enables SPCS caller's rights (the container can query Snowflake as the logged-in user). See the Caller's Rights section below.
+
+`owner_role` is optional. It sets which operator role sees and manages the app in the admin UI (see [Admin UI](#admin-ui-optional) and [Access model](#access-model-multi-tenant-isolation)). Omit it to default to `MENDIX_ADMIN_OPERATOR_ROLE`. The deploy PAT's role (`MENDIX_DEPLOY_CONTROLLER_ROLE`) is privileged, so `upload-pad.ps1` can register and deploy apps under any `owner_role`.
 
 For constants that reference the Snowflake internal hostname (JDBC URLs), use the `{SNOWFLAKE_HOST}` placeholder — the base image entrypoint resolves it at container startup:
 
@@ -317,7 +320,7 @@ The exported `.zip` file is the PAD.
 
 The script does four things:
 
-1. **Registers the app** (`POST /apps`) — creates the SPCS service, filestorage stage, and secrets. Returns 409 if already registered (safe to retry).
+1. **Registers the app** (`POST /apps`) — creates the SPCS service, filestorage stage, and secrets, and records the app's `owner_role`. Returns 409 if already registered (safe to retry).
 2. **Uploads the PAD** to Snowflake stage via `snow stage copy` — bypasses the SPCS ingress timeout entirely.
 3. **Triggers deploy** (`POST /apps/{name}/trigger-deploy`) — returns 202 immediately; the controller runs the deploy in a background thread.
 4. **Polls** `GET /apps/{name}` every 10 seconds until `last_deploy_status` is `READY` or `FAILED`.
@@ -460,7 +463,7 @@ docker push "$repo/mendix-deploy-controller:latest"
 .\update.ps1
 ```
 
-`update.ps1` runs `ALTER SERVICE ... FROM SPECIFICATION`, which re-resolves the `:latest` tag and pins the new sha256 digest. The script polls until the service is RUNNING with the refreshed digest.
+`update.ps1` runs `ALTER SERVICE ... FROM SPECIFICATION`, which re-resolves the `:latest` tag and pins the new sha256 digest. The script polls until the service is RUNNING with the refreshed digest. The controller spec includes `executeAsCaller: true`, and `update.ps1` re-applies `SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800` each run (idempotent), so existing deployments pick up the caller-rights capability needed for role resolution on the next update. For a first-time upgrade to multi-tenant isolation, run the migration first (see [Access model: Upgrading an existing deployment](#upgrading-an-existing-deployment)).
 
 > **Important:** `ALTER SERVICE SUSPEND` + `RESUME` does NOT re-pull `:latest`. SPCS pins the image to a sha256 digest in the resolved spec at CREATE / ALTER time and keeps that digest across SUSPEND/RESUME. Only `ALTER SERVICE FROM SPECIFICATION` re-resolves the tag.
 
@@ -471,6 +474,8 @@ Wait for `MENDIX_DEPLOY_CONTROLLER` to return to RUNNING before deploying any ap
 ## Admin UI (Optional)
 
 A Streamlit-based admin UI is available under `Admin UI/`. It runs as a sibling SPCS service in the same compute pool, calls the controller over the internal SPCS network, and lets operators manage apps from a browser instead of from PowerShell. PAD uploads still go through `upload-pad.ps1`; the admin UI handles status, redeploys from an existing stage path, constants edits, suspend/resume, logs, and delete.
+
+The admin UI is multi-tenant: each app has an `owner_role` and an operator sees and manages only the apps owned by roles they hold. See [Access model](#access-model-multi-tenant-isolation) below.
 
 ### One-Time Setup
 
@@ -488,18 +493,21 @@ notepad admin-ui-config.json
 .\setup.ps1
 ```
 
-`setup.ps1` prints the endpoint URL when it's ready and creates `MENDIX_ADMIN_OPERATOR_ROLE`. Grant it to humans who should access the UI:
+`setup.ps1` prints the endpoint URL when it's ready and creates `MENDIX_ADMIN_OPERATOR_ROLE`. It also provisions the service with `executeAsCaller: true` and sets `SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800`, which the UI needs to resolve each operator's roles. Grant the operator role to humans who should access the UI:
 
 ```sql
 GRANT ROLE MENDIX_ADMIN_OPERATOR_ROLE TO USER <username>;
 ```
 
-Open the printed URL in a browser, authenticate with Snowflake credentials, and the apps registered with the controller appear in the Apps page.
+Grant any additional team roles that own apps the same way; an operator's visible apps are determined by the roles they hold (see [Access model](#access-model-multi-tenant-isolation)).
+
+Open the printed URL in a browser, authenticate with Snowflake credentials, and the apps owned by your roles appear in the Apps page. The Register page includes an **Owner role** selector populated from your roles.
 
 ### Internals
 
 - The admin UI calls the controller at `http://mendix-deploy-controller:8080` over the internal SPCS DNS. No PAT is involved on this internal path; Snowflake enforces service-to-service access via the owner role of both services.
-- The admin UI forwards the operator's Snowflake username to the controller as an `X-Operator` header on every mutating request. The controller logs it for audit.
+- The admin UI forwards the operator's Snowflake username as an `X-Operator` header (logged for audit) and the operator's resolved roles as an `X-Operator-Roles` header on every request. The controller uses the role header for authorization on this internal path.
+- Roles are resolved once per browser session: the admin UI opens a caller's-rights session (compound token) and runs `SELECT CURRENT_AVAILABLE_ROLES()`. This is why the service runs with `executeAsCaller: true` and a caller-token validity. Mid-session role-grant changes are picked up on the next page refresh.
 - `MIN_INSTANCES = MAX_INSTANCES = 1` because SPCS does not provide session affinity and Streamlit holds per-session state in process memory.
 - The admin UI's image must be rebuilt and re-pinned when its code changes:
 
@@ -510,6 +518,34 @@ cd "Admin UI"
 ```
 
   `update.ps1` runs `ALTER SERVICE ... FROM SPECIFICATION` so SPCS re-resolves `:latest`. See the warning under "Updating the Controller" for why SUSPEND/RESUME isn't enough.
+
+### Access model (multi-tenant isolation)
+
+Each app row in `MENDIX_APPS` has an `owner_role`. The controller authorizes every request against the caller's Snowflake roles:
+
+- An operator may see and manage an app only if its `owner_role` is one of the caller's roles. Reads of other apps return 404 (existence is not leaked); mutations return 403.
+- `MENDIX_DEPLOY_CONTROLLER_ROLE` is **privileged**: it bypasses the `owner_role` check and can act on any app. This is the role behind the deploy PAT, so `upload-pad.ps1` keeps working across all apps. Override the privileged set with the `PRIVILEGED_ROLES` env var on the controller (comma-separated) if needed.
+
+The controller learns the caller's roles two ways, depending on the path:
+
+- **Internal hop (admin UI):** trusts the `X-Operator-Roles` header, which the admin UI derived from Snowflake under the operator's identity.
+- **Public endpoint (PAT clients like `upload-pad.ps1`):** SPCS injects a caller token, so the controller resolves the roles itself via `CURRENT_AVAILABLE_ROLES()` and ignores any `X-Operator-Roles` header. This is why the controller also runs with `executeAsCaller: true` and a caller-token validity.
+
+A request with no resolvable roles is denied (fail closed).
+
+#### Upgrading an existing deployment
+
+Existing installs need the `owner_role` column added and backfilled before the new controller image enforces it:
+
+1. Run the migration once: `snow sql -f Controller/sql/migration-owner-role.sql --connection <conn>` (adjust the schema in the file if not `YOUR_DB.PUBLIC`). Existing rows backfill to `MENDIX_ADMIN_OPERATOR_ROLE`, so they stay visible to that role.
+2. Build/push the **admin UI** image, then `Admin UI\update.ps1`, then port-flip the admin UI (8501 → 8502 → 8501) to re-provision the WebSocket route after the `executeAsCaller` change.
+3. Build/push the **controller** image, then `Controller\update.ps1`.
+
+Deploy the admin UI before the controller: a new admin UI sending `X-Operator-Roles` to the old controller is harmless, whereas enforcing in the controller before the admin UI sends the header would lock operators out.
+
+### Theming (Siemens iX)
+
+The admin UI applies Siemens iX-aligned styling via `Admin UI/app/branding.py::apply_branding()`, called from every page after `st.set_page_config`. It injects the Titillium Web font (Google Fonts, an open stand-in for licensed Siemens Sans), the iX v5 Classic color tokens with light/dark handled through `@media (prefers-color-scheme)`, and a persistent Siemens logo via `st.logo()` (vendored at `Admin UI/app/assets/siemens-logo-white.svg`). The logo is white-only, so its container is given a dark backdrop in both light and dark mode. The theme's primary color is set with the `STREAMLIT_THEME_PRIMARY_COLOR` env var in the service spec; everything else is CSS-only (no `.streamlit/config.toml`). Details and the exact token values are in [`PLAN-2-siemens-ix-styling.md`](PLAN-2-siemens-ix-styling.md).
 
 ---
 

@@ -26,11 +26,14 @@ def _detail(response: httpx.Response) -> str:
 
 
 class ControllerClient:
-    def __init__(self, base_url: str, operator: str):
+    def __init__(self, base_url: str, operator: str, roles: tuple[str, ...] = ()):
+        headers = {"X-Operator": operator}
+        if roles:
+            headers["X-Operator-Roles"] = ",".join(roles)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=DEFAULT_TIMEOUT,
-            headers={"X-Operator": operator},
+            headers=headers,
         )
 
     def close(self) -> None:

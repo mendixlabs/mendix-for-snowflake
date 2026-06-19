@@ -48,6 +48,7 @@ spec:
     env:
       CONTROLLER_URL: $controllerUrl
       STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "1024"
+      STREAMLIT_THEME_PRIMARY_COLOR: "#006e93"
     readinessProbe:
       port: 8501
       path: /_stcore/health
@@ -55,12 +56,18 @@ spec:
   - name: streamlit
     port: 8501
     public: true
+capabilities:
+  securityContext:
+    executeAsCaller: true
 "@
 
+# executeAsCaller requires a caller-token validity; without it the role-resolution
+# session fails with OAUTH_ACCESS_TOKEN_EXPIRED. Idempotent, so run every time.
 $sql = @"
 ALTER SERVICE $dbSchema.MENDIX_DEPLOY_ADMIN_UI FROM SPECIFICATION `$`$
 $serviceSpec
 `$`$;
+ALTER SERVICE $dbSchema.MENDIX_DEPLOY_ADMIN_UI SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
 "@
 
 $tmpFile = [System.IO.Path]::GetTempFileName() + ".sql"

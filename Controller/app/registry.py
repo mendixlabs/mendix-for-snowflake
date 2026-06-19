@@ -26,6 +26,7 @@ def _row_to_record(row: dict) -> AppRecord:
         last_deploy_status=row.get("LAST_DEPLOY_STATUS"),
         created_at=str(row["CREATED_AT"]) if row.get("CREATED_AT") else None,
         last_deployed_at=str(row["LAST_DEPLOYED_AT"]) if row.get("LAST_DEPLOYED_AT") else None,
+        owner_role=row.get("OWNER_ROLE") or "MENDIX_ADMIN_OPERATOR_ROLE",
     )
 
 
@@ -35,8 +36,8 @@ def create_app(record: AppRecord) -> None:
         f"""
         INSERT INTO {_TABLE}
             (name, service_name, pg_database, resource_tier, use_caller_rights,
-             constants, pad_stage_path, endpoint_url, last_deploy_status)
-        SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s
+             constants, pad_stage_path, endpoint_url, last_deploy_status, owner_role)
+        SELECT %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s, %s
         """,
         (
             record.name,
@@ -48,6 +49,7 @@ def create_app(record: AppRecord) -> None:
             record.pad_stage_path,
             record.endpoint_url,
             record.last_deploy_status,
+            record.owner_role,
         ),
     )
 
@@ -67,7 +69,7 @@ def list_apps() -> list[AppRecord]:
 _ALLOWED_UPDATE_COLUMNS = frozenset({
     "constants", "pad_stage_path", "endpoint_url",
     "last_deploy_status", "last_deployed_at",
-    "resource_tier", "use_caller_rights",
+    "resource_tier", "use_caller_rights", "owner_role",
 })
 
 

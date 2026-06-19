@@ -7,8 +7,24 @@ import threading
 from typing import Any
 
 import snowflake.connector
+from snowflake.connector import errors as _sf_errors
 
 logger = logging.getLogger(__name__)
+
+# Errnos that mean "re-authenticate": the SPCS service session token rotates, and
+# a long-lived cached connection eventually presents an expired one. 390114 is
+# "Authentication token has expired."
+_REAUTH_ERRNOS = {390114, 390111, 390195}
+
+
+def _is_recoverable(exc: Exception) -> bool:
+    """True if the error is an auth/connection failure where reconnecting with a
+    freshly-read session token is worth one retry (the statement did not run)."""
+    if getattr(exc, "errno", None) in _REAUTH_ERRNOS:
+        return True
+    if isinstance(exc, (_sf_errors.OperationalError, _sf_errors.InterfaceError)):
+        return True
+    return "token has expired" in str(exc).lower()
 
 # RLock so execute_sql can hold the lock while calling get_connection (which also acquires it).
 _lock = threading.RLock()
@@ -48,16 +64,26 @@ def get_connection() -> snowflake.connector.SnowflakeConnection:
 def execute_sql(sql: str, params: tuple = ()) -> list[dict]:
     # Hold the lock for the entire operation: the Snowflake connector is not
     # thread-safe on a single connection, so concurrent cursor use would interleave.
+    global _conn
     with _lock:
-        conn = get_connection()
         try:
+            conn = get_connection()
             cur = conn.cursor(snowflake.connector.DictCursor)
             cur.execute(sql, params)
             return cur.fetchall()
-        except Exception:
-            global _conn
+        except Exception as e:
+            # Drop the connection so the next get_connection() reconnects and
+            # re-reads the (rotated) session token from /snowflake/session/token.
             _conn = None
-            raise
+            if not _is_recoverable(e):
+                raise
+            logger.warning("Snowflake call failed (%s); reconnecting and retrying once", e)
+        # Single retry on a fresh connection. The original statement did not run
+        # (auth/connection failed before execution), so this is safe to repeat.
+        conn = get_connection()
+        cur = conn.cursor(snowflake.connector.DictCursor)
+        cur.execute(sql, params)
+        return cur.fetchall()
 
 
 def create_or_replace_secret(fqn: str, value: str) -> None:
@@ -105,6 +131,15 @@ def show_service_status(name: str) -> str | None:
     except Exception:
         return None
     return None
+
+
+def show_all_service_statuses() -> dict[str, str]:
+    """Return {SERVICE_NAME: status} for all services in the schema, in one query."""
+    try:
+        rows = execute_sql(f"SHOW SERVICES IN SCHEMA {_DB_SCHEMA}")
+        return {row["name"]: row.get("status") for row in rows}
+    except Exception:
+        return {}
 
 
 def get_service_endpoint(name: str) -> str | None:

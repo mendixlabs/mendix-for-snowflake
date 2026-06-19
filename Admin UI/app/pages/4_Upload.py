@@ -9,10 +9,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from auth import client
+from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
 
 st.set_page_config(page_title="Upload PAD", layout="centered")
+apply_branding()
 st.title("Upload PAD")
 
 st.caption(

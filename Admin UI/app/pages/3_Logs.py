@@ -10,10 +10,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from auth import client
+from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
 
 st.set_page_config(page_title="Logs", layout="wide")
+apply_branding()
 st.title("Service logs")
 
 try:

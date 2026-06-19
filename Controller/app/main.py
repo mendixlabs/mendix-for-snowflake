@@ -12,10 +12,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 
-from . import activity, registry, snowflake_client as sf
+from . import activity, auth, registry, snowflake_client as sf
 from .models import (
     AppRecord,
     AppStatusResponse,
@@ -181,7 +181,7 @@ def _poll_status(service_name: str, target: str, timeout_secs: int = 300) -> boo
         status = sf.show_service_status(service_name)
         if status == target:
             return True
-        time.sleep(5)
+        time.sleep(10)
     return False
 
 
@@ -200,6 +200,34 @@ def _constants_from_dict(d: dict[str, str]) -> list[PadConstant]:
 
 
 # ---------------------------------------------------------------------------
+# Authorization
+# ---------------------------------------------------------------------------
+
+def caller_roles(request: Request) -> set[str]:
+    """FastAPI dependency: the authoritative role set for the request."""
+    return auth.resolve_caller_roles(request)
+
+
+def _record_for_read(name: str, roles: set[str]) -> AppRecord:
+    """Load an app the caller may see, else 404 (unauthorized is indistinguishable
+    from missing, so existence is not leaked)."""
+    record = registry.get_app(name)
+    if not record or not auth.authorize(record.owner_role, roles):
+        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+    return record
+
+
+def _record_for_mutation(name: str, roles: set[str]) -> AppRecord:
+    """Load an app the caller may mutate: 404 if missing, 403 if not authorized."""
+    record = registry.get_app(name)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+    if not auth.authorize(record.owner_role, roles):
+        raise HTTPException(status_code=403, detail=f"Not authorized for app '{name}'")
+    return record
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -209,17 +237,25 @@ def health():
 
 
 @app.get("/apps")
-def list_apps():
+def list_apps(roles: set[str] = Depends(caller_roles)):
     apps = registry.list_apps()
+    statuses = sf.show_all_service_statuses()
     result = []
     for a in apps:
-        svc_status = sf.show_service_status(a.service_name)
+        if not auth.authorize(a.owner_role, roles):
+            continue
+        svc_status = statuses.get(a.service_name)
         result.append({**a.model_dump(), "service_status": svc_status})
     return result
 
 
 @app.post("/apps", status_code=status.HTTP_201_CREATED)
-def create_app(req: CreateAppRequest):
+def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
+    if not auth.authorize(req.owner_role, roles):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot assign owner_role '{req.owner_role}': not one of your roles",
+        )
     if registry.get_app(req.name):
         raise HTTPException(status_code=409, detail=f"App '{req.name}' already exists")
 
@@ -270,6 +306,7 @@ def create_app(req: CreateAppRequest):
         last_deploy_status="STARTING",
         created_at=None,
         last_deployed_at=None,
+        owner_role=req.owner_role,
     )
     registry.create_app(record)
 
@@ -277,19 +314,15 @@ def create_app(req: CreateAppRequest):
 
 
 @app.get("/apps/{name}")
-def get_app(name: str):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def get_app(name: str, roles: set[str] = Depends(caller_roles)):
+    record = _record_for_read(name, roles)
     svc_status = sf.show_service_status(record.service_name)
     return AppStatusResponse(app=record, service_status=svc_status)
 
 
 @app.get("/apps/{name}/logs")
-def get_logs(name: str, lines: int = 200):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def get_logs(name: str, lines: int = 200, roles: set[str] = Depends(caller_roles)):
+    record = _record_for_read(name, roles)
     logs = sf.get_service_logs(record.service_name, lines=lines)
     return {"logs": logs}
 
@@ -362,8 +395,10 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
 
 @app.post("/apps/{name}/deploy", status_code=202)
 def deploy_pad(name: str, pad_file: UploadFile = File(...),
-               background_tasks: BackgroundTasks = None):
+               background_tasks: BackgroundTasks = None,
+               roles: set[str] = Depends(caller_roles)):
     """Upload a PAD zip. For large PADs (>50 MB) use snow stage copy + /trigger-deploy instead."""
+    _record_for_mutation(name, roles)
     dest_dir = os.path.join(DEPLOY_STAGE_MOUNT, "apps", name)
     os.makedirs(dest_dir, exist_ok=True)
     dest_path = os.path.join(dest_dir, "current.zip")
@@ -381,8 +416,10 @@ def deploy_pad(name: str, pad_file: UploadFile = File(...),
 
 
 @app.post("/apps/{name}/trigger-deploy", status_code=202)
-def trigger_deploy(name: str, background_tasks: BackgroundTasks):
+def trigger_deploy(name: str, background_tasks: BackgroundTasks,
+                   roles: set[str] = Depends(caller_roles)):
     """Trigger deploy from a PAD already at stage path apps/{name}/current.zip."""
+    _record_for_mutation(name, roles)
     pad_path = os.path.join(DEPLOY_STAGE_MOUNT, "apps", name, "current.zip")
     if not os.path.exists(pad_path):
         raise HTTPException(
@@ -415,10 +452,9 @@ def _run_update_constants(name: str, service_name: str, merged: dict,
 
 
 @app.put("/apps/{name}/constants", status_code=202)
-def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: BackgroundTasks):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: BackgroundTasks,
+                     roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
 
     for const_name, value in req.constants.items():
         secret_name = "MX_CONST_" + const_name.replace(".", "_").upper()
@@ -455,10 +491,9 @@ def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
 
 
 @app.put("/apps/{name}/spec", status_code=202)
-def update_spec(name: str, req: UpdateSpecRequest, background_tasks: BackgroundTasks):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def update_spec(name: str, req: UpdateSpecRequest, background_tasks: BackgroundTasks,
+                roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
     if req.resource_tier is None and req.use_caller_rights is None:
         raise HTTPException(
             status_code=400,
@@ -475,8 +510,15 @@ def update_spec(name: str, req: UpdateSpecRequest, background_tasks: BackgroundT
 
 
 @app.get("/activity")
-def list_activity(app: Optional[str] = None, operator: Optional[str] = None, limit: int = 100):
-    return activity.query(app=app, operator=operator, limit=limit)
+def list_activity(app: Optional[str] = None, operator: Optional[str] = None, limit: int = 100,
+                  roles: set[str] = Depends(caller_roles)):
+    rows = activity.query(app=app, operator=operator, limit=limit)
+    if roles & auth.PRIVILEGED_ROLES:
+        return rows
+    # Non-privileged operators see only activity for apps they own. Rows with no
+    # app (e.g. create attempts) are visible only to privileged roles.
+    visible = {a.name for a in registry.list_apps() if auth.authorize(a.owner_role, roles)}
+    return [r for r in rows if r.get("app_name") in visible]
 
 
 def _run_suspend(name: str, service_name: str) -> None:
@@ -510,30 +552,26 @@ def _run_resume(name: str, service_name: str) -> None:
 
 
 @app.post("/apps/{name}/suspend", status_code=202)
-def suspend_app(name: str, background_tasks: BackgroundTasks):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def suspend_app(name: str, background_tasks: BackgroundTasks,
+                roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
     registry.update_app(name, {"last_deploy_status": "SUSPENDING"})
     background_tasks.add_task(_run_suspend, name, record.service_name)
     return {"status": "SUSPENDING"}
 
 
 @app.post("/apps/{name}/resume", status_code=202)
-def resume_app(name: str, background_tasks: BackgroundTasks):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def resume_app(name: str, background_tasks: BackgroundTasks,
+               roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
     registry.update_app(name, {"last_deploy_status": "RESUMING"})
     background_tasks.add_task(_run_resume, name, record.service_name)
     return {"status": "RESUMING"}
 
 
 @app.delete("/apps/{name}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_app(name: str):
-    record = registry.get_app(name)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"App '{name}' not found")
+def delete_app(name: str, roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
 
     try:
         sf.suspend_service(record.service_name)

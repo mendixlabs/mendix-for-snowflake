@@ -12,10 +12,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from auth import client
+from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
 
 st.set_page_config(page_title="Apps", layout="wide")
+apply_branding()
 st.title("Apps")
 
 _TRANSIENT = {"DEPLOYING", "SUSPENDING", "RESUMING", "STARTING"}

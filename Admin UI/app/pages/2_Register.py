@@ -10,11 +10,19 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from auth import client
+from auth import client, operator_roles
+from branding import apply_branding
 from controller_client import ControllerError
 
 st.set_page_config(page_title="Register", layout="centered")
+apply_branding()
 st.title("Register a new app")
+
+_DEFAULT_OWNER_ROLE = "MENDIX_ADMIN_OPERATOR_ROLE"
+_owner_candidates = [
+    r for r in operator_roles()
+    if r != "PUBLIC" and not r.startswith("SNOWFLAKE_")
+]
 
 st.caption(
     "Creates the SPCS service, filestorage stage, and PG/admin secrets. "
@@ -48,6 +56,18 @@ with st.form("register"):
         help="Sets executeAsCaller=true so the service receives the operator's "
              "OAuth token on each request.",
     )
+    if _owner_candidates:
+        owner_role = st.selectbox(
+            "Owner role",
+            options=_owner_candidates,
+            help="Operators holding this role will see and manage the app.",
+        )
+    else:
+        st.warning(
+            "Could not resolve your Snowflake roles; the app will be owned by "
+            f"`{_DEFAULT_OWNER_ROLE}`."
+        )
+        owner_role = _DEFAULT_OWNER_ROLE
     constants_text = st.text_area(
         "Constants (JSON object, optional)",
         value="{}",
@@ -85,6 +105,7 @@ if submitted:
             "resource_tier": resource_tier,
             "use_caller_rights": use_caller_rights,
             "constants": constants,
+            "owner_role": owner_role,
         }
         try:
             result = client().create_app(payload)

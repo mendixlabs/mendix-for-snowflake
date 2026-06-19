@@ -26,8 +26,13 @@
 #     "admin_password":    "Admin1234!",
 #     "resource_tier":     "medium",
 #     "use_caller_rights": true,
+#     "owner_role":        "MENDIX_ADMIN_OPERATOR_ROLE",
 #     "constants":         { "Module.Constant": "value" }
 #   }
+#
+# owner_role is optional: it sets which operator role sees and manages the app in
+# the admin UI. Omit it to default to MENDIX_ADMIN_OPERATOR_ROLE. This deploy PAT's
+# role (MENDIX_DEPLOY_CONTROLLER_ROLE) is privileged and can deploy any app.
 
 param(
     [Parameter(Mandatory)][string]$AppName,
@@ -77,6 +82,9 @@ if ($AppConfig) {
         use_caller_rights = if ($null -ne $appCfg.use_caller_rights) { [bool]$appCfg.use_caller_rights } else { $false }
         constants         = if ($appCfg.constants) { $appCfg.constants } else { @{} }
     }
+    # owner_role controls which operator role sees/manages the app in the admin UI.
+    # Omit to let the controller default it to MENDIX_ADMIN_OPERATOR_ROLE.
+    if ($appCfg.owner_role) { $body["owner_role"] = $appCfg.owner_role }
 
     Write-Host "Registering app '$AppName'..." -ForegroundColor Cyan
     try {

@@ -4,12 +4,14 @@ from __future__ import annotations
 import streamlit as st
 
 from auth import controller_url, current_operator
+from branding import apply_branding
 
 st.set_page_config(
     page_title="Mendix Deployment Admin",
     page_icon=":satellite:",
     layout="wide",
 )
+apply_branding()
 
 operator = current_operator()
 

@@ -26,6 +26,7 @@ class CreateAppRequest(BaseModel):
     resource_tier: ResourceTier = ResourceTier.medium
     use_caller_rights: bool = False
     constants: dict[str, str] = Field(default_factory=dict)
+    owner_role: str = "MENDIX_ADMIN_OPERATOR_ROLE"
 
 
 class UpdateConstantsRequest(BaseModel):
@@ -44,6 +45,7 @@ class AppRecord(BaseModel):
     resource_tier: str
     use_caller_rights: bool
     constants: dict[str, str]
+    owner_role: str = "MENDIX_ADMIN_OPERATOR_ROLE"
     pad_stage_path: Optional[str]
     endpoint_url: Optional[str]
     last_deploy_status: Optional[str]

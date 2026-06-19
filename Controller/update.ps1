@@ -69,12 +69,18 @@ spec:
   - name: controller-api
     port: 8080
     public: true
+capabilities:
+  securityContext:
+    executeAsCaller: true
 "@
 
+# executeAsCaller requires a caller-token validity; without it caller-rights
+# sessions fail with OAUTH_ACCESS_TOKEN_EXPIRED. Idempotent, so run every time.
 $sql = @"
 ALTER SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER FROM SPECIFICATION `$`$
 $serviceSpec
 `$`$;
+ALTER SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
 "@
 
 $tmpFile = [System.IO.Path]::GetTempFileName() + ".sql"

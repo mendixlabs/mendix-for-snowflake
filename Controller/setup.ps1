@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS $dbSchema.MENDIX_APPS (
     endpoint_url       VARCHAR,
     last_deploy_status VARCHAR,
     created_at         TIMESTAMP  DEFAULT CURRENT_TIMESTAMP,
-    last_deployed_at   TIMESTAMP
+    last_deployed_at   TIMESTAMP,
+    owner_role         VARCHAR    DEFAULT 'MENDIX_ADMIN_OPERATOR_ROLE'
 );
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE $dbSchema.MENDIX_APPS
@@ -153,8 +154,13 @@ spec:
   - name: controller-api
     port: 8080
     public: true
+capabilities:
+  securityContext:
+    executeAsCaller: true
 "@
 
+# executeAsCaller requires a caller-token validity; without it caller-rights
+# sessions fail with OAUTH_ACCESS_TOKEN_EXPIRED.
 Run-Sql @"
 CREATE SERVICE IF NOT EXISTS $dbSchema.MENDIX_DEPLOY_CONTROLLER
     IN COMPUTE POOL $pool
@@ -164,6 +170,8 @@ $serviceSpec
     MIN_INSTANCES = 1
     MAX_INSTANCES = 1
     QUERY_WAREHOUSE = $wh;
+
+ALTER SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
 "@ -Label "CREATE SERVICE"
 
 # ---- step 5: endpoint -------------------------------------------------------
@@ -192,5 +200,5 @@ Write-Host "  Controller: $dbSchema.MENDIX_DEPLOY_CONTROLLER"
 if ($url) {
     Write-Host "  Endpoint:   $url" -ForegroundColor Yellow
 } else {
-    Write-Host "  Endpoint:   still provisioning — run: SHOW ENDPOINTS IN SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER;" -ForegroundColor DarkGray
+    Write-Host "  Endpoint:   still provisioning - run: SHOW ENDPOINTS IN SERVICE $dbSchema.MENDIX_DEPLOY_CONTROLLER;" -ForegroundColor DarkGray
 }
