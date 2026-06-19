@@ -67,6 +67,16 @@ QUERY_WAREHOUSE = os.environ["QUERY_WAREHOUSE"]
 DEPLOY_STAGE = f"@{DB_SCHEMA}.MENDIX_DEPLOY_STAGE"
 DEPLOY_STAGE_MOUNT = "/mnt/deploy-stage"
 
+# Infrastructure services whose own logs are exposed via /system/logs/{target}.
+# (service_name, container). Defaults match the names created by the setup scripts;
+# override via env if a deployment renames them.
+CONTROLLER_SERVICE_NAME = os.environ.get("CONTROLLER_SERVICE_NAME", "MENDIX_DEPLOY_CONTROLLER")
+ADMIN_UI_SERVICE_NAME = os.environ.get("ADMIN_UI_SERVICE_NAME", "MENDIX_DEPLOY_ADMIN_UI")
+SYSTEM_SERVICES: dict[str, tuple[str, str]] = {
+    "controller": (CONTROLLER_SERVICE_NAME, "controller"),
+    "admin-ui": (ADMIN_UI_SERVICE_NAME, "streamlit"),
+}
+
 # Derived from controller secrets at startup
 _PG_HOST: str | None = None
 
@@ -324,6 +334,28 @@ def get_app(name: str, roles: set[str] = Depends(caller_roles)):
 def get_logs(name: str, lines: int = 200, roles: set[str] = Depends(caller_roles)):
     record = _record_for_read(name, roles)
     logs = sf.get_service_logs(record.service_name, lines=lines)
+    return {"logs": logs}
+
+
+@app.get("/system/logs/{target}")
+def get_system_logs(target: str, lines: int = 200, roles: set[str] = Depends(caller_roles)):
+    """Logs for the infrastructure services themselves (controller, admin UI).
+
+    Restricted to privileged roles: these logs span every tenant's operator
+    activity, so they sit outside the per-app owner_role isolation.
+    """
+    if not (roles & auth.PRIVILEGED_ROLES):
+        raise HTTPException(status_code=403, detail="System logs are restricted to privileged roles")
+    entry = SYSTEM_SERVICES.get(target)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Unknown system service '{target}'")
+    service_name, container = entry
+    try:
+        logs = sf.get_service_logs(service_name, container=container, lines=lines)
+    except Exception as e:
+        # Surface the underlying reason (e.g. the controller's role lacks access to
+        # another service's logs) instead of an opaque 500.
+        raise HTTPException(status_code=502, detail=f"Could not read {target} logs: {e}")
     return {"logs": logs}
 
 

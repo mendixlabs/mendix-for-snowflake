@@ -81,6 +81,21 @@ def operator_roles() -> tuple[str, ...]:
     return st.session_state["operator_roles"]
 
 
+def _privileged_roles() -> frozenset[str]:
+    # Mirrors the controller's PRIVILEGED_ROLES contract (same env, same default) so
+    # the UI shows system options exactly to the operators the controller will allow.
+    raw = os.environ.get("PRIVILEGED_ROLES", "MENDIX_DEPLOY_CONTROLLER_ROLE")
+    return frozenset(r.strip().upper() for r in raw.split(",") if r.strip())
+
+
+def is_privileged_operator() -> bool:
+    """True if the operator holds a privileged role (gates system-wide views).
+
+    UX gate only; the controller independently enforces this on every request.
+    """
+    return bool(set(operator_roles()) & _privileged_roles())
+
+
 def controller_url() -> str:
     return os.environ.get("CONTROLLER_URL", "http://mendix-deploy-controller:8080")
 

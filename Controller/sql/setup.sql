@@ -95,6 +95,8 @@ spec:
       DB_SCHEMA: <DB_SCHEMA>
       PG_EAI: <PG_EAI>
       QUERY_WAREHOUSE: <WAREHOUSE>
+      CONTROLLER_SERVICE_NAME: MENDIX_DEPLOY_CONTROLLER
+      ADMIN_UI_SERVICE_NAME: MENDIX_DEPLOY_ADMIN_UI
     secrets:
     - snowflakeSecret: <DB_SCHEMA>.CTRL_PG_HOST
       directoryPath: /secrets/pg_host

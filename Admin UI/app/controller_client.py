@@ -57,6 +57,10 @@ class ControllerClient:
     def get_logs(self, name: str, lines: int = 200) -> str:
         return self._request("GET", f"/apps/{name}/logs", params={"lines": lines}).json().get("logs", "")
 
+    def get_system_logs(self, target: str, lines: int = 200) -> str:
+        """Logs for an infrastructure service ('controller' or 'admin-ui'). Privileged only."""
+        return self._request("GET", f"/system/logs/{target}", params={"lines": lines}).json().get("logs", "")
+
     def trigger_deploy(self, name: str) -> dict:
         return self._request("POST", f"/apps/{name}/trigger-deploy").json()
 

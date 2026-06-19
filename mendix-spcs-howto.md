@@ -477,6 +477,8 @@ A Streamlit-based admin UI is available under `Admin UI/`. It runs as a sibling 
 
 The admin UI is multi-tenant: each app has an `owner_role` and an operator sees and manages only the apps owned by roles they hold. See [Access model](#access-model-multi-tenant-isolation) below.
 
+The Logs page also exposes the infrastructure services' own logs (the controller and the admin UI itself) as selectable sources. These are restricted to privileged operators (roles intersecting `PRIVILEGED_ROLES`, default `MENDIX_DEPLOY_CONTROLLER_ROLE`) and served by the controller's `GET /system/logs/{target}` endpoint, since they span every tenant's activity.
+
 ### One-Time Setup
 
 ```powershell

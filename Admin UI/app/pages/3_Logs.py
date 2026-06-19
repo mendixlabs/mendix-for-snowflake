@@ -9,7 +9,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 import streamlit.components.v1 as components
 
-from auth import client
+from auth import client, is_privileged_operator
 from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
@@ -18,18 +18,31 @@ st.set_page_config(page_title="Logs", layout="wide")
 apply_branding()
 st.title("Service logs")
 
+# Infrastructure services, shown only to privileged operators. Each entry is
+# (display label, kind, key) where kind routes to the right controller call.
+_SYSTEM_SOURCES = [
+    ("🛠 Controller (system)", "system", "controller"),
+    ("🛠 Admin UI (system)", "system", "admin-ui"),
+]
+
 try:
     apps = list_apps()
 except ControllerError as e:
     st.error(f"Failed to load apps: {e}")
     st.stop()
 
-if not apps:
+sources = (_SYSTEM_SOURCES if is_privileged_operator() else []) + [
+    (a["name"], "app", a["name"]) for a in apps
+]
+
+if not sources:
     st.info("No apps registered yet.")
     st.stop()
 
-names = [a["name"] for a in apps]
-selected = st.selectbox("App", names)
+labels = [s[0] for s in sources]
+selected_label = st.selectbox("Source", labels)
+selected_kind, selected_key = next((s[1], s[2]) for s in sources if s[0] == selected_label)
+selected = selected_label
 
 cols = st.columns([1, 1, 4])
 with cols[0]:
@@ -77,7 +90,10 @@ def _scroll_script(is_first_render: bool) -> str:
 @st.fragment(run_every=10 if auto else None)
 def _log_view() -> None:
     try:
-        logs = client().get_logs(selected, lines=int(lines))
+        if selected_kind == "system":
+            logs = client().get_system_logs(selected_key, lines=int(lines))
+        else:
+            logs = client().get_logs(selected_key, lines=int(lines))
     except ControllerError as e:
         st.error(str(e))
         return
