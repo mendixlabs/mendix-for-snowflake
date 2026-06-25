@@ -64,12 +64,17 @@ CREATE TABLE IF NOT EXISTS app_public.MENDIX_ACTIVITY (
 CREATE STAGE IF NOT EXISTS app_public.MENDIX_DEPLOY_STAGE
     ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
 
--- Single-row readiness flag. The compute pool / warehouse exist only after
--- grant_callback runs; rather than probe with SHOW + RESULT_SCAN (fragile inside a
--- proc), grant_callback records the fact here and maybe_start_services reads it.
-CREATE TABLE IF NOT EXISTS app_public.install_state (pool_ready BOOLEAN DEFAULT FALSE);
-INSERT INTO app_public.install_state (pool_ready)
-    SELECT FALSE WHERE NOT EXISTS (SELECT 1 FROM app_public.install_state);
+-- Single-row readiness state. Each callback records its own precondition here and
+-- maybe_start_services gates on all three, deterministically (SYSTEM$GET_ALL_REFERENCES
+-- does not return a clean empty sentinel for declared-but-unbound references, so we
+-- track bind state ourselves rather than probe it).
+CREATE TABLE IF NOT EXISTS app_public.install_state (
+    pool_ready   BOOLEAN DEFAULT FALSE,   -- grant_callback created pool + warehouse
+    secret_bound BOOLEAN DEFAULT FALSE,   -- pg_secret reference bound
+    eai_bound    BOOLEAN DEFAULT FALSE    -- pg_eai reference bound
+);
+INSERT INTO app_public.install_state (pool_ready, secret_bound, eai_bound)
+    SELECT FALSE, FALSE, FALSE WHERE NOT EXISTS (SELECT 1 FROM app_public.install_state);
 
 -- -----------------------------------------------------------------------------
 -- 4. grant_callback - REQUIRED for apps with containers.
@@ -152,6 +157,8 @@ CREATE OR REPLACE PROCEDURE app_public.register_reference(ref_name STRING, opera
     EXECUTE AS OWNER
 AS
 $$
+DECLARE
+    is_add BOOLEAN;
 BEGIN
     CASE (operation)
         WHEN 'ADD' THEN
@@ -163,6 +170,14 @@ BEGIN
         ELSE
             RETURN 'unknown operation: ' || operation;
     END;
+
+    -- Track bind state deterministically (used by maybe_start_services).
+    is_add := (operation = 'ADD');
+    IF (ref_name = 'pg_secret') THEN
+        UPDATE app_public.install_state SET secret_bound = :is_add;
+    ELSEIF (ref_name = 'pg_eai') THEN
+        UPDATE app_public.install_state SET eai_bound = :is_add;
+    END IF;
 
     CALL app_public.maybe_start_services();
     RETURN 'registered ' || ref_name || ' (' || operation || ')';
@@ -183,21 +198,13 @@ CREATE OR REPLACE PROCEDURE app_public.maybe_start_services()
 AS
 $$
 DECLARE
-    pool_ready BOOLEAN DEFAULT FALSE;
-    secret_ref STRING;
-    eai_ref    STRING;
+    ready BOOLEAN DEFAULT FALSE;
 BEGIN
-    -- Compute pool + warehouse created? (grant_callback sets this flag)
-    SELECT pool_ready INTO :pool_ready FROM app_public.install_state;
-    IF (NOT pool_ready) THEN
-        RETURN 'waiting: compute pool / warehouse not yet created (grant privileges)';
-    END IF;
-
-    -- Both references bound? SYSTEM$GET_ALL_REFERENCES returns '[]' when unbound.
-    secret_ref := SYSTEM$GET_ALL_REFERENCES('pg_secret');
-    eai_ref    := SYSTEM$GET_ALL_REFERENCES('pg_eai');
-    IF (secret_ref = '[]' OR eai_ref = '[]') THEN
-        RETURN 'waiting: bind pg_secret and pg_eai';
+    -- All preconditions met? pool + warehouse created (grant_callback) AND both
+    -- references bound (register_reference). Tracked deterministically in install_state.
+    SELECT pool_ready AND secret_bound AND eai_bound INTO :ready FROM app_public.install_state;
+    IF (NOT ready) THEN
+        RETURN 'waiting: need privileges granted (pool/warehouse) and pg_secret + pg_eai bound';
     END IF;
 
     CALL app_public.start_controller();
@@ -213,8 +220,9 @@ $$;
 --      - IMAGE_REPO env is the fixed provider FQN of the mendix-base image.
 --      - PG_EAI env is reference('pg_eai') so the controller's per-app CREATE
 --        SERVICE emits EXTERNAL_ACCESS_INTEGRATIONS = (reference('pg_eai')).
---      - The bootstrap PG credential mounts via reference('pg_secret') instead of
---        the CTRL_PG_HOST / CTRL_PG_PASS secrets created by setup.ps1.
+--      - The bootstrap PG credential mounts via the bound pg_secret reference
+--        (snowflakeSecret.objectReference, NOT reference() which is SQL-level only)
+--        instead of the CTRL_PG_HOST / CTRL_PG_PASS secrets created by setup.ps1.
 --
 --    PHASE 2 CONTROLLER CODE CHANGE REQUIRED: today the controller reads two files
 --    /secrets/pg_host and /secrets/pg_pass. With a single bound pg_secret it must
@@ -256,7 +264,8 @@ BEGIN
       CONTROLLER_SERVICE_NAME: MENDIX_DEPLOY_CONTROLLER
       ADMIN_UI_SERVICE_NAME: MENDIX_DEPLOY_ADMIN_UI
     secrets:
-    - snowflakeSecret: reference(''pg_secret'')
+    - snowflakeSecret:
+        objectReference: ''pg_secret''
       directoryPath: /secrets/pg
     readinessProbe:
       port: 8080
