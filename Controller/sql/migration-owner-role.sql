@@ -1,7 +1,7 @@
 -- Migration: add per-app owner_role for multi-tenant operator isolation.
 -- Run once via `snow sql -f` BEFORE deploying the controller image that enforces
 -- owner_role. Idempotent: the ADD COLUMN is guarded, the backfill only touches
--- NULLs. Substitute the schema if not YOUR_DB.PUBLIC.
+-- NULLs. Replace YOUR_DB.PUBLIC with your database.schema before running.
 
 ALTER TABLE YOUR_DB.PUBLIC.MENDIX_APPS
   ADD COLUMN IF NOT EXISTS owner_role VARCHAR;
