@@ -1,6 +1,6 @@
 # =============================================================================
 # Snowflake CLI native-app project definition (replaces the hand-rolled setup.ps1
-# orchestration for the provider side; see PLAN-native-app-packaging.md §8).
+# orchestration for the provider side; see PLAN-native-app-packaging.md section 8).
 #
 # Deploy:  snow app run            (builds package + installs app in one account)
 # Version: snow app version create
@@ -11,7 +11,7 @@
 # the referenced images at definition time.
 #
 # Provider-specific identifiers (db/schema/role) are intentionally NOT hardcoded
-# here — they are read from native-app-config.json (gitignored) by the build
+# here - they are read from native-app-config.json (gitignored) by the build
 # script, to keep the personal dev DB name out of git (see memory
 # feedback-no-personal-db-name-in-git).
 # =============================================================================
@@ -32,12 +32,14 @@ entities:
     identifier: MENDIX_SPCS_APP
     from:
       target: pkg
-    # debug: true exposes app-owned objects to the provider role during dev so we
-    # can inspect the controller/admin-ui services and the registry tables.
-    debug: true
+    # debug mode is not supported with manifest_version >= 2 (errors on upgrade).
+    # Use session debugging instead to inspect app-owned objects during dev.
+    debug: false
 
   # Standalone image repository the manifest + service specs reference by FQN.
-  # `snow spcs image-repository deploy images` creates it.
+  # Created out-of-band (CREATE IMAGE REPOSITORY) and pushed to by
+  # scripts/build-and-push.ps1; `snow app run` does not deploy this entity.
+  # Fully qualified so it never resolves to the connection's default schema.
   images:
     type: image-repository
-    identifier: MENDIX_NATIVE_REPO
+    identifier: MENDIX_NATIVE_APP.IMAGES.MENDIX_NATIVE_REPO

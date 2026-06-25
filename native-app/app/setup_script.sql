@@ -1,11 +1,11 @@
 -- =============================================================================
--- Mendix-on-SPCS Native App — setup script
+-- Mendix-on-SPCS Native App - setup script
 --
 -- Runs as the application (app role) on install and upgrade. Replaces:
 --   Controller/sql/setup.sql, Controller/setup.ps1, Admin UI/setup.ps1.
 --
 -- The app role owns everything created here, so the object-level GRANTs the old
--- setup.sql issued to MENDIX_DEPLOY_CONTROLLER_ROLE are gone — ownership covers them.
+-- setup.sql issued to MENDIX_DEPLOY_CONTROLLER_ROLE are gone - ownership covers them.
 --
 -- Provisioning order is driven by Snowflake's callbacks, not by this script's
 -- top-to-bottom flow:
@@ -64,8 +64,15 @@ CREATE TABLE IF NOT EXISTS app_public.MENDIX_ACTIVITY (
 CREATE STAGE IF NOT EXISTS app_public.MENDIX_DEPLOY_STAGE
     ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
 
+-- Single-row readiness flag. The compute pool / warehouse exist only after
+-- grant_callback runs; rather than probe with SHOW + RESULT_SCAN (fragile inside a
+-- proc), grant_callback records the fact here and maybe_start_services reads it.
+CREATE TABLE IF NOT EXISTS app_public.install_state (pool_ready BOOLEAN DEFAULT FALSE);
+INSERT INTO app_public.install_state (pool_ready)
+    SELECT FALSE WHERE NOT EXISTS (SELECT 1 FROM app_public.install_state);
+
 -- -----------------------------------------------------------------------------
--- 4. grant_callback — REQUIRED for apps with containers.
+-- 4. grant_callback - REQUIRED for apps with containers.
 --    Invoked by Snowflake after the consumer grants the manifest privileges.
 --    Creates the compute pool + warehouse (named off the app database so two
 --    installs in one account do not collide), then attempts to start services.
@@ -77,10 +84,14 @@ CREATE OR REPLACE PROCEDURE app_public.grant_callback(privileges ARRAY)
 AS
 $$
 DECLARE
-    app_db   STRING := CURRENT_DATABASE();
-    pool     STRING := app_db || '_COMPUTE_POOL';
-    wh       STRING := app_db || '_WH';
+    app_db   STRING;
+    pool     STRING;
+    wh       STRING;
 BEGIN
+    app_db := CURRENT_DATABASE();
+    pool   := app_db || '_COMPUTE_POOL';
+    wh     := app_db || '_WH';
+
     IF (ARRAY_CONTAINS('CREATE COMPUTE POOL'::VARIANT, :privileges)) THEN
         EXECUTE IMMEDIATE
             'CREATE COMPUTE POOL IF NOT EXISTS ' || pool ||
@@ -95,13 +106,14 @@ BEGIN
             ' INITIALLY_SUSPENDED = TRUE';
     END IF;
 
+    UPDATE app_public.install_state SET pool_ready = TRUE;
     CALL app_public.maybe_start_services();
     RETURN 'grant_callback: pool=' || pool || ' wh=' || wh;
 END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- 5. configuration_callback — REQUIRED for SECRET / EXTERNAL_ACCESS_INTEGRATION
+-- 5. configuration_callback - REQUIRED for SECRET / EXTERNAL_ACCESS_INTEGRATION
 --    references. Returns the JSON config Snowsight shows in the consumer bind
 --    dialog. Envelope: { "type": "CONFIGURATION", "payload": { ... } }.
 --    (Payload shapes per docs.snowflake.com/.../container-eai-example.)
@@ -131,7 +143,7 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- 6. register_reference — the manifest reference callback (pg_secret, pg_eai).
+-- 6. register_reference - the manifest reference callback (pg_secret, pg_eai).
 --    ADD / REMOVE / CLEAR dispatch per docs. After binding, attempt to start.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE app_public.register_reference(ref_name STRING, operation STRING, ref_or_alias STRING)
@@ -158,7 +170,7 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- 7. maybe_start_services — idempotent readiness gate.
+-- 7. maybe_start_services - idempotent readiness gate.
 --    Starts the controller + admin UI only once BOTH the compute pool exists
 --    (grant_callback ran) AND both references are bound (register_reference ran).
 --    Safe to call from either callback; CREATE SERVICE IF NOT EXISTS makes it
@@ -171,20 +183,19 @@ CREATE OR REPLACE PROCEDURE app_public.maybe_start_services()
 AS
 $$
 DECLARE
-    app_db     STRING := CURRENT_DATABASE();
-    pool       STRING := app_db || '_COMPUTE_POOL';
-    pool_cnt   INTEGER DEFAULT 0;
-    secret_ref STRING := SYSTEM$GET_ALL_REFERENCES('pg_secret');
-    eai_ref    STRING := SYSTEM$GET_ALL_REFERENCES('pg_eai');
+    pool_ready BOOLEAN DEFAULT FALSE;
+    secret_ref STRING;
+    eai_ref    STRING;
 BEGIN
-    -- Compute pool present?
-    SHOW COMPUTE POOLS LIKE :pool;
-    SELECT COUNT(*) INTO :pool_cnt FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
-    IF (pool_cnt = 0) THEN
-        RETURN 'waiting: compute pool not yet created (grant CREATE COMPUTE POOL)';
+    -- Compute pool + warehouse created? (grant_callback sets this flag)
+    SELECT pool_ready INTO :pool_ready FROM app_public.install_state;
+    IF (NOT pool_ready) THEN
+        RETURN 'waiting: compute pool / warehouse not yet created (grant privileges)';
     END IF;
 
     -- Both references bound? SYSTEM$GET_ALL_REFERENCES returns '[]' when unbound.
+    secret_ref := SYSTEM$GET_ALL_REFERENCES('pg_secret');
+    eai_ref    := SYSTEM$GET_ALL_REFERENCES('pg_eai');
     IF (secret_ref = '[]' OR eai_ref = '[]') THEN
         RETURN 'waiting: bind pg_secret and pg_eai';
     END IF;
@@ -196,7 +207,7 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- 8. start_controller — ports Controller/setup.ps1 step 4 into SQL.
+-- 8. start_controller - ports Controller/setup.ps1 step 4 into SQL.
 --    Differences vs. today:
 --      - DB_SCHEMA env is the app's own <db>.APP_PUBLIC (resolved at runtime).
 --      - IMAGE_REPO env is the fixed provider FQN of the mendix-base image.
@@ -207,7 +218,7 @@ $$;
 --
 --    PHASE 2 CONTROLLER CODE CHANGE REQUIRED: today the controller reads two files
 --    /secrets/pg_host and /secrets/pg_pass. With a single bound pg_secret it must
---    read one secret and split host:port from password. Tracked in PLAN §5.4.
+--    read one secret and split host:port from password. Tracked in PLAN section 5.4.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE app_public.start_controller()
     RETURNS STRING
@@ -216,13 +227,21 @@ CREATE OR REPLACE PROCEDURE app_public.start_controller()
 AS
 $$
 DECLARE
-    app_db    STRING := CURRENT_DATABASE();
-    db_schema STRING := app_db || '.APP_PUBLIC';
-    pool      STRING := app_db || '_COMPUTE_POOL';
-    wh        STRING := app_db || '_WH';
+    app_db    STRING;
+    db_schema STRING;
+    pool      STRING;
+    wh        STRING;
     spec      STRING;
     ddl       STRING;
+    dollar    STRING;
 BEGIN
+    app_db    := CURRENT_DATABASE();
+    db_schema := app_db || '.APP_PUBLIC';
+    pool      := app_db || '_COMPUTE_POOL';
+    wh        := app_db || '_WH';
+    -- Built at runtime so no literal dollar-quote delimiter appears in this proc
+    -- body (which is itself dollar-quoted); used to quote the inline service spec.
+    dollar    := '$' || '$';
     spec :=
 'spec:
   containers:
@@ -260,7 +279,7 @@ capabilities:
 
     ddl := 'CREATE SERVICE IF NOT EXISTS ' || db_schema || '.MENDIX_DEPLOY_CONTROLLER' ||
            ' IN COMPUTE POOL ' || pool ||
-           ' FROM SPECIFICATION $$' || spec || '$$' ||
+           ' FROM SPECIFICATION ' || dollar || spec || dollar ||
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
 
@@ -277,7 +296,7 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- 9. start_admin_ui — ports Admin UI/setup.ps1 step 2 into SQL.
+-- 9. start_admin_ui - ports Admin UI/setup.ps1 step 2 into SQL.
 --    Both services are owned by the single app role now, so the separate
 --    MENDIX_ADMIN_UI_ROLE / cross-role MONITOR grant from setup.ps1 is dropped.
 --    Endpoint access goes to app_admin (operators are granted app_admin post-install).
@@ -289,13 +308,19 @@ CREATE OR REPLACE PROCEDURE app_public.start_admin_ui()
 AS
 $$
 DECLARE
-    app_db    STRING := CURRENT_DATABASE();
-    db_schema STRING := app_db || '.APP_PUBLIC';
-    pool      STRING := app_db || '_COMPUTE_POOL';
-    wh        STRING := app_db || '_WH';
+    app_db    STRING;
+    db_schema STRING;
+    pool      STRING;
+    wh        STRING;
     spec      STRING;
     ddl       STRING;
+    dollar    STRING;
 BEGIN
+    app_db    := CURRENT_DATABASE();
+    db_schema := app_db || '.APP_PUBLIC';
+    pool      := app_db || '_COMPUTE_POOL';
+    wh        := app_db || '_WH';
+    dollar    := '$' || '$';   -- avoid a literal dollar-quote delimiter in this body
     -- Internal DNS: same-schema service reachable by its lowercased dashed name.
     -- VERIFY this short form resolves inside a Native App namespace.
     spec :=
@@ -324,7 +349,7 @@ capabilities:
 
     ddl := 'CREATE SERVICE IF NOT EXISTS ' || db_schema || '.MENDIX_DEPLOY_ADMIN_UI' ||
            ' IN COMPUTE POOL ' || pool ||
-           ' FROM SPECIFICATION $$' || spec || '$$' ||
+           ' FROM SPECIFICATION ' || dollar || spec || dollar ||
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
 
@@ -339,6 +364,10 @@ END;
 $$;
 
 -- -----------------------------------------------------------------------------
--- 10. Manual re-run helper (operators with app_admin can re-attempt a start).
+-- 10. Grant the manifest callbacks to an application role so the framework can
+--     invoke them, plus a manual re-run helper for operators.
 -- -----------------------------------------------------------------------------
-GRANT USAGE ON PROCEDURE app_public.maybe_start_services() TO APPLICATION ROLE app_admin;
+GRANT USAGE ON PROCEDURE app_public.grant_callback(ARRAY)                       TO APPLICATION ROLE app_admin;
+GRANT USAGE ON PROCEDURE app_public.get_reference_config(STRING)                TO APPLICATION ROLE app_admin;
+GRANT USAGE ON PROCEDURE app_public.register_reference(STRING, STRING, STRING)  TO APPLICATION ROLE app_admin;
+GRANT USAGE ON PROCEDURE app_public.maybe_start_services()                      TO APPLICATION ROLE app_admin;

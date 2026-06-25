@@ -58,14 +58,19 @@ Write-Host "[1/3] Logging into Snowflake image registry..." -ForegroundColor Cya
 if ($LASTEXITCODE -ne 0) { Write-Error "Registry login failed."; exit 1 }
 
 $registry = (& snow spcs image-registry url --connection $conn).Trim()
-$repoUrl  = "$registry/$repoFqn"
+# Docker repository references must be lowercase; the Snowflake registry is
+# case-insensitive and stores the path lowercased. The manifest/spec image paths
+# keep the SQL identifier casing (Snowflake resolves them case-insensitively).
+$repoUrl  = "$registry/$repoFqn".ToLower()
 
 Write-Host "[2/3] Building and pushing images to $repoUrl ..." -ForegroundColor Cyan
 foreach ($name in $images.Keys) {
     $context = Join-Path $repoRoot $images[$name]
     Write-Host "  $name  (context: $($images[$name]))" -ForegroundColor DarkGray
-    # SPCS requires linux/amd64.
-    & docker build --platform linux/amd64 -t $name $context
+    # SPCS requires a single linux/amd64 image. --provenance=false suppresses the
+    # BuildKit attestation/provenance manifests that otherwise make the push an OCI
+    # manifest list, which SPCS can fail to resolve at CREATE SERVICE time.
+    & docker build --platform linux/amd64 --provenance=false -t $name $context
     if ($LASTEXITCODE -ne 0) { Write-Error "Build failed: $name"; exit 1 }
     & docker tag $name "$repoUrl/${name}:latest"
     & docker push "$repoUrl/${name}:latest"

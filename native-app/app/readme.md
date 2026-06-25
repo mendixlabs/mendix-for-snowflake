@@ -7,15 +7,15 @@ controller brings each one up as its own container service.
 
 ## What you grant at install
 
-- **CREATE COMPUTE POOL** – runs the controller, admin UI, and per-app services.
-- **BIND SERVICE ENDPOINT** – exposes the admin UI and per-app web endpoints.
-- **CREATE WAREHOUSE** – query warehouse for the services.
+- **CREATE COMPUTE POOL** - runs the controller, admin UI, and per-app services.
+- **BIND SERVICE ENDPOINT** - exposes the admin UI and per-app web endpoints.
+- **CREATE WAREHOUSE** - query warehouse for the services.
 
 ## What you bind at install
 
-- **pg_secret** – a secret holding your Snowflake-managed Postgres `host:port` and
+- **pg_secret** - a secret holding your Snowflake-managed Postgres `host:port` and
   application password.
-- **pg_eai** – an external access integration permitting egress to that Postgres
+- **pg_eai** - an external access integration permitting egress to that Postgres
   instance.
 
 ## One-time consumer setup (outside the app)

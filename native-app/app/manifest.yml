@@ -1,9 +1,9 @@
 # =============================================================================
-# Mendix-on-SPCS Native App — manifest
+# Mendix-on-SPCS Native App - manifest
 #
 # Replaces the three setup.ps1 scripts' "what infrastructure do we need" intent
 # with a declarative privilege + reference contract the consumer fulfils at
-# install (see PLAN-native-app-packaging.md §5.1).
+# install (see PLAN-native-app-packaging.md section 5.1).
 #
 # IMAGE PATHS: a single fixed provider-side fully-qualified name, used identically
 # here (the allow-list) and in every CREATE SERVICE in setup_script.sql. They are
@@ -13,7 +13,7 @@
 # pipeline (scripts/build-and-push.ps1) substitutes them before `snow app` deploy.
 # =============================================================================
 
-manifest_version: 2          # VERIFY with `snow app validate`; plan §5.1 specifies 2 (auto-grant privileges)
+manifest_version: 2          # VERIFY with `snow app validate`; plan section 5.1 specifies 2 (auto-grant privileges)
 
 version:
   name: v1
@@ -46,7 +46,7 @@ restricted_callers_rights:
 
 # Account-level privileges the consumer grants by clicking through the install
 # dialog. Everything inside the app's own namespace (SERVICE/SECRET/STAGE/TABLE)
-# needs no account grant — the app role owns those objects.
+# needs no account grant - the app role owns those objects.
 privileges:
   - CREATE COMPUTE POOL:
       description: "Run the controller, admin UI, and per-app Mendix services"
@@ -71,6 +71,6 @@ references:
       description: "External access integration permitting egress to the Postgres instance"
       privileges:
         - USAGE
-      object_type: EXTERNAL_ACCESS_INTEGRATION                   # underscores — validated correct (Cortex was wrong)
+      object_type: EXTERNAL_ACCESS_INTEGRATION                   # underscores - validated correct (Cortex was wrong)
       register_callback: app_public.register_reference
       configuration_callback: app_public.get_reference_config   # required for EAI refs
