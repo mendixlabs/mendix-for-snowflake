@@ -5,5 +5,5 @@ native-app/.build/
 service_spec.yaml
 .snowflake
 __pycache__/
-# Support case contains account identifiers - keep out of git
-SUPPORT-CASE-native-app-executeascaller.md
+# Support case contains account identifiers - keep out of git (any extension)
+SUPPORT-CASE-native-app-executeascaller.*
