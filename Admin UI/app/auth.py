@@ -43,6 +43,26 @@ def _read_service_token() -> str:
         return f.read().strip()
 
 
+def open_caller_session() -> "snowflake.connector.SnowflakeConnection | None":
+    """Open a caller-rights Snowflake session (compound token) as the operator.
+
+    The session runs with the operator's own roles, so anything it queries
+    reflects exactly what that operator is allowed to see. Returns None when no
+    caller token is available (the service is not running with executeAsCaller,
+    or the request carried no caller token). The caller must close() the result.
+    """
+    caller_token = _caller_token()
+    if not caller_token:
+        return None
+    compound = f"{_read_service_token()}.{caller_token}"
+    return snowflake.connector.connect(
+        host=os.environ["SNOWFLAKE_HOST"],
+        account=os.environ["SNOWFLAKE_ACCOUNT"],
+        token=compound,
+        authenticator="oauth",
+    )
+
+
 def list_operator_roles() -> tuple[str, ...]:
     """Resolve the operator's available roles via a caller-rights session.
 
@@ -50,16 +70,9 @@ def list_operator_roles() -> tuple[str, ...]:
     Returns an empty tuple if the caller token is unavailable (e.g. the service
     is not running with executeAsCaller, or the request carried no caller token).
     """
-    caller_token = _caller_token()
-    if not caller_token:
+    conn = open_caller_session()
+    if conn is None:
         return ()
-    compound = f"{_read_service_token()}.{caller_token}"
-    conn = snowflake.connector.connect(
-        host=os.environ["SNOWFLAKE_HOST"],
-        account=os.environ["SNOWFLAKE_ACCOUNT"],
-        token=compound,
-        authenticator="oauth",
-    )
     try:
         cur = conn.cursor()
         cur.execute("SELECT CURRENT_AVAILABLE_ROLES()")
