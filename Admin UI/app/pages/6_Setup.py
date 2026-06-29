@@ -140,7 +140,13 @@ st.caption(
     "register_reference, which start the controller and admin UI."
 )
 st.code(
-    f"""GRANT CREATE COMPUTE POOL   ON ACCOUNT TO APPLICATION {app_name};
+    f"""-- Caller-token validity for executeAsCaller services. An application object
+-- cannot set this on its own services (needs MANAGE SERVICE CALLER ACCESS), so
+-- set it once at the account level; it cascades to the app's services. Without
+-- it, the admin UI's operator-role resolution fails with OAUTH_ACCESS_TOKEN_EXPIRED.
+ALTER ACCOUNT SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
+
+GRANT CREATE COMPUTE POOL   ON ACCOUNT TO APPLICATION {app_name};
 GRANT CREATE WAREHOUSE      ON ACCOUNT TO APPLICATION {app_name};
 GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO APPLICATION {app_name};
 GRANT APPLICATION ROLE {app_name}.app_admin TO ROLE ACCOUNTADMIN;

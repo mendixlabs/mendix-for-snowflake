@@ -292,9 +292,12 @@ capabilities:
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
 
-    -- executeAsCaller sessions fail with OAUTH_ACCESS_TOKEN_EXPIRED without this.
-    EXECUTE IMMEDIATE 'ALTER SERVICE ' || db_schema ||
-        '.MENDIX_DEPLOY_CONTROLLER SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800';
+    -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is NOT set here: setting it on a service
+    -- requires MANAGE SERVICE CALLER ACCESS on the account, which no application
+    -- object can hold. The consumer's ACCOUNTADMIN sets it once at the account
+    -- level (Setup/Verify page, step 5); the value cascades to this service.
+    -- executeAsCaller caller sessions need that non-default validity to avoid
+    -- OAUTH_ACCESS_TOKEN_EXPIRED.
 
     -- Power-user / CLI access to the controller API.
     EXECUTE IMMEDIATE 'GRANT SERVICE ROLE ' || db_schema ||
@@ -362,8 +365,8 @@ capabilities:
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
 
-    EXECUTE IMMEDIATE 'ALTER SERVICE ' || db_schema ||
-        '.MENDIX_DEPLOY_ADMIN_UI SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800';
+    -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is set account-level by the consumer
+    -- (see start_controller for why); it cascades to this service.
 
     EXECUTE IMMEDIATE 'GRANT SERVICE ROLE ' || db_schema ||
         '.MENDIX_DEPLOY_ADMIN_UI!ALL_ENDPOINTS_USAGE TO APPLICATION ROLE app_admin';
