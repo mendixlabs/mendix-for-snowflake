@@ -89,7 +89,7 @@ jobs:
         # --provenance only matters for the registry push, not a local scan.
         run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
       - name: Trivy scan (full report, SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: '${{ matrix.image }}:scan'
           format: sarif
@@ -101,7 +101,7 @@ jobs:
           sarif_file: trivy-${{ matrix.image }}.sarif
           category: trivy-${{ matrix.image }}
       - name: Trivy gate (fail on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: '${{ matrix.image }}:scan'
           format: table
@@ -140,7 +140,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy secret scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: '.'
