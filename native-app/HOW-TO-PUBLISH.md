@@ -65,7 +65,7 @@ cd native-app\scripts
 .\build-and-push.ps1
 ```
 
-This builds `mendix-deploy-controller`, `mendix-admin-ui`, and `mendix-base` for `linux/amd64`, pushes them to the provider registry, and stages a token-resolved deploy copy at `native-app/.build/`.
+This builds `mendix-deploy-controller`, `mendix-admin-ui`, and `mendix-base` for `linux/amd64`, pushes them to the provider registry, and stages a token-resolved deploy copy at `native-app/.build/`. It also captures the `@sha256:...` digest of each pushed image and rewrites every `:latest` tag to the immutable digest in the staged `manifest.yml` and `setup_script.sql`, so the frozen version pins the exact images that passed the security review.
 
 ### Step 2: Create the version
 
@@ -155,7 +155,12 @@ Once the version is validated, set it as the default so consumers get it. The CL
 snow app release-directive set default --version v1 --patch 0 --connection <conn>
 ```
 
-The equivalent SQL `ALTER APPLICATION PACKAGE MENDIX_SPCS_PKG SET DEFAULT RELEASE DIRECTIVE VERSION = v1 PATCH = 0;` is the documented form **(verify at run** against your Snowflake/CLI version**)** — prefer the CLI command above.
+The equivalent SQL form (both `VERSION` and `PATCH` are required per docs) — prefer the CLI command above:
+
+```sql
+ALTER APPLICATION PACKAGE MENDIX_SPCS_PKG
+  SET DEFAULT RELEASE DIRECTIVE VERSION = v1 PATCH = 0;
+```
 
 For an EXTERNAL package this is gated: the release directive cannot be set until `review_status = APPROVED` (see [Distribution gate](#distribution-gate-external-listing)).
 
@@ -177,7 +182,7 @@ snow app version create v1 --connection <conn>   # creates v1 patch N+1
 snow app release-directive set default --version v1 --patch <N+1> --connection <conn>
 ```
 
-Consumers on the listing upgrade by running (**verify at run**: exact `ALTER APPLICATION … UPGRADE` syntax):
+Consumers on the listing upgrade by running (`PATCH` is optional — omit to get the latest patch):
 
 ```sql
 ALTER APPLICATION MENDIX_SPCS_APP UPGRADE USING VERSION v1 PATCH <N+1>;
@@ -219,4 +224,4 @@ Verify: `SHOW LISTINGS;`
 
 - **Cross-account consumer install not yet validated.** The dry-run above is same-account only. A true cross-account GET (listing → fresh consumer account) requires a second Snowflake account in the production target org, cross-account image access, and a complete from-scratch ACCOUNTADMIN prerequisites run (the same-account dry-run reuses an existing `MENDIX_PG` instance and EAI).
 - **`review_status = REJECTED`**: if NAAAPS rejects, file a sev-4 support ticket with a remediation/appeal. Do not pre-remediate speculatively.
-- **`listing_terms.type` value, `subtitle` mandatory for private listing, `auto_fulfillment` for same-region**: verify these at listing-create time.
+- **Private listing manifest open items (verify at listing-create time):** `listing_terms.type: CUSTOM` is set in the template (matched to the live sibling listing); confirm a private targeted listing accepts it. Also unconfirmed: whether `subtitle`/`profile` are mandatory for a private targeted listing, and whether a same-region manifest may omit `auto_fulfillment`.

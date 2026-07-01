@@ -390,30 +390,31 @@ When `use_caller_rights: true`, SPCS injects a user identity token into every in
 
 ### One-Time SQL Setup
 
-Run as ACCOUNTADMIN after the service is running:
+Run as ACCOUNTADMIN after install (covered by Setup/Verify page step 5):
 
 ```sql
--- Extend caller token validity (default is 2 min; max 7 days)
-ALTER SERVICE <DATABASE>.<SCHEMA>.<APP>_SERVICE
-  SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
+-- Extend caller token validity account-wide (default is 2 min; max 7 days).
+-- The app cannot set this on its own services, so it must be set at the account level;
+-- the value cascades to all app-owned services.
+ALTER ACCOUNT SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
 ```
 
-The controller runs this automatically when `use_caller_rights: true` and the service is first created.
+**Grant the application read access to the Snowflake data each Mendix app queries:**
 
-**Grant the service permission to act on behalf of callers:**
+In a Native App, services run with *restricted* caller's rights: a query succeeds only when both the end user AND the application object hold the privilege. Grant per Mendix app, per data source:
 
 ```sql
--- For each Snowflake database/schema/warehouse the app needs to query:
-GRANT CALLER USAGE ON DATABASE <target_db> TO ROLE <service_owner_role>;
-GRANT INHERITED CALLER USAGE ON ALL SCHEMAS IN DATABASE <target_db> TO ROLE <service_owner_role>;
-GRANT INHERITED CALLER SELECT ON ALL TABLES IN DATABASE <target_db> TO ROLE <service_owner_role>;
-GRANT CALLER USAGE ON WAREHOUSE <warehouse> TO ROLE <service_owner_role>;
-
--- End users must have secondary roles active for cross-role access:
-ALTER USER <username> SET DEFAULT_SECONDARY_ROLES = ('ALL');
+-- Repeat for each database/schema/warehouse the app queries.
+GRANT USAGE  ON DATABASE <data_db>                           TO APPLICATION <app_name>;
+GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO APPLICATION <app_name>;
+GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO APPLICATION <app_name>;
+GRANT SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema> TO APPLICATION <app_name>;
+GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO APPLICATION <app_name>;
 ```
 
-Caller's rights uses two-layer permission checks: both the user AND the service owner role must have the privilege. If a user gets "Object does not exist or not authorized" for a table they can clearly see in Snowsight, the `GRANT INHERITED CALLER SELECT` is missing for that object.
+Snowflake does not allow `FUTURE` grants to an application, so re-run the `ALL TABLES` / `ALL VIEWS` grants after adding new objects the app must read.
+
+**Grant before the app first connects.** A privilege added after the app has already opened its Snowflake session is not picked up live. The app must reconnect with a freshly minted caller token, which can take up to `SERVICE_CALLER_TOKEN_VALIDITY_SECS` (up to ~30 minutes) to rotate. Without the grants the app reports: *the owning application must have at least one CALLER privilege granted on TABLE ...*.
 
 ### SnowflakeSSO Module Setup
 
