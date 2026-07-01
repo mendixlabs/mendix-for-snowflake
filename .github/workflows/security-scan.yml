@@ -1,0 +1,197 @@
+# Automated security scanning (NAAAPS "thorough security testing" best practice).
+#
+# Jobs map to the Snowflake security questionnaire's SDLC questions:
+#   dependency-audit  -> dependency/CVE scanning (pip-audit, direct pins)
+#   container-scan    -> container image scanning (Trivy, catches transitive deps
+#                        like the cryptography CVE only visible in the built image)
+#   python-sast       -> static analysis (Bandit)
+#   secret-scan       -> committed-secret detection (Trivy secret scanner)
+#   malware-scan      -> malware scan of the shipped image filesystems (ClamAV)
+#   shellcheck        -> entrypoint.sh shell-script lint
+#
+# No Snowflake credentials are needed anywhere: every job scans static files or
+# locally-built images. DAST is deliberately absent (the Controller cannot boot
+# without a live Snowflake session; see PLAN notes).
+#
+# Severity policy: jobs fail on CRITICAL/HIGH (and any secret or malware hit);
+# MEDIUM/LOW are report-only via SARIF in the Security tab. Base images are
+# digest-pinned, so a newly red weekly run is the signal to refresh digests.
+
+name: security-scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Controller/**'
+      - 'Admin UI/**'
+      - 'Mendix Base Image/**'
+      - '.github/workflows/security-scan.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Controller/**'
+      - 'Admin UI/**'
+      - 'Mendix Base Image/**'
+      - '.github/workflows/security-scan.yml'
+  schedule:
+    # Weekly: catches newly disclosed CVEs against unchanged dependency pins.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-audit:
+    name: pip-audit (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [Controller, Admin UI]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the python:3.12-slim base of both service images.
+          python-version: '3.12'
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit pinned dependencies
+        # pip-audit has no SARIF output; the job fails on any known CVE and the
+        # table lands in the log. Security-tab coverage for the same packages
+        # comes from container-scan's Trivy SARIF.
+        run: pip-audit -r "${{ matrix.service }}/requirements.txt"
+
+  container-scan:
+    name: trivy (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mendix-deploy-controller
+            context: Controller
+          - image: mendix-admin-ui
+            context: Admin UI
+          - image: mendix-base
+            context: Mendix Base Image
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        # Same platform flag as native-app/scripts/build-and-push.ps1;
+        # --provenance only matters for the registry push, not a local scan.
+        run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
+      - name: Trivy scan (full report, SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: '${{ matrix.image }}:scan'
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          exit-code: '0'
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }}
+      - name: Trivy gate (fail on CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: '${{ matrix.image }}:scan'
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          skip-setup-trivy: true
+
+  python-sast:
+    name: bandit (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [Controller, Admin UI]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install bandit
+        run: pip install "bandit[sarif]"
+      - name: Bandit scan (full report, SARIF)
+        run: bandit -r "${{ matrix.service }}/app" -f sarif -o bandit.sarif --exit-zero
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bandit.sarif
+          category: bandit-${{ matrix.service }}
+      - name: Bandit gate (fail on HIGH severity)
+        run: bandit -r "${{ matrix.service }}/app" --severity-level high
+
+  secret-scan:
+    name: trivy secrets (repo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy secret scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: '.'
+          scanners: secret
+          format: sarif
+          output: trivy-secrets.sarif
+          exit-code: '1'
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets
+
+  malware-scan:
+    name: clamav (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mendix-deploy-controller
+            context: Controller
+          - image: mendix-admin-ui
+            context: Admin UI
+          - image: mendix-base
+            context: Mendix Base Image
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
+      - name: Export image filesystem
+        run: |
+          cid=$(docker create "${{ matrix.image }}:scan")
+          mkdir rootfs
+          docker export "$cid" | tar -x -C rootfs --no-same-owner --no-same-permissions --exclude='dev/*'
+          docker rm "$cid"
+      - name: ClamAV scan
+        # Looks for injected/malicious binaries in what actually ships, as
+        # distinct from known CVEs in legitimate packages (container-scan).
+        # Uses the DB snapshot bundled in the clamav image (refreshed on each
+        # image release), which is current enough for a weekly CI scan.
+        run: |
+          docker run --rm -v "$PWD/rootfs:/scandir:ro" clamav/clamav:stable \
+            clamscan -r -i /scandir
+
+  shellcheck:
+    name: shellcheck (entrypoint.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck entrypoint.sh
+        # shellcheck is preinstalled on ubuntu-latest runners.
+        run: shellcheck "Mendix Base Image/entrypoint.sh"

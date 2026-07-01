@@ -35,11 +35,13 @@ if [ -d "$SECRETS_DIR" ]; then
     # Fixed mappings
     # directoryPath secrets create a file named secret_string inside the directory
     if [ -f "$SECRETS_DIR/pg_pass/secret_string" ]; then
-        export RUNTIME_PARAMS_DATABASEPASSWORD="$(cat "$SECRETS_DIR/pg_pass/secret_string")"
+        RUNTIME_PARAMS_DATABASEPASSWORD="$(cat "$SECRETS_DIR/pg_pass/secret_string")"
+        export RUNTIME_PARAMS_DATABASEPASSWORD
     fi
     if [ -f "$SECRETS_DIR/admin_pass/secret_string" ]; then
-        export M2EE_ADMIN_PASS="$(cat "$SECRETS_DIR/admin_pass/secret_string")"
-        export RUNTIME_ADMINUSER_PASSWORD="$(cat "$SECRETS_DIR/admin_pass/secret_string")"
+        M2EE_ADMIN_PASS="$(cat "$SECRETS_DIR/admin_pass/secret_string")"
+        RUNTIME_ADMINUSER_PASSWORD="$M2EE_ADMIN_PASS"
+        export M2EE_ADMIN_PASS RUNTIME_ADMINUSER_PASSWORD
     fi
 
     # Dynamic constant secrets: mx_const_<module>_<name> -> read variables.conf for env var mapping
