@@ -873,15 +873,34 @@ def delete_app(name: str, roles: set[str] = Depends(caller_roles)):
     except Exception:
         pass
 
-    sf.drop_service(record.service_name)
-    # Dropping the service auto-drops its service roles (revoking the endpoint
-    # grant from app_admin); the per-app application role persists, so drop it.
-    sf.drop_app_access_role(name)
-
-    # The app's schema contains everything it owns: credential secrets
-    # (PG password, admin password, constants) and the filestorage stage.
-    # CASCADE removes them all, including the user's uploaded files; the
-    # admin UI warns about this before the delete.
-    sf.drop_schema_cascade(_schema_fqn(record.app_schema))
+    # Every drop below is IF EXISTS, so a partially failed delete is safe to
+    # retry. Attempt each step even when an earlier one fails, then keep the
+    # registry row alive if anything failed: the row is the operator's only
+    # handle for retrying, and deleting it while a service or schema survives
+    # would leak that object with nothing left pointing at it.
+    cleanup_steps = [
+        # Dropping the service auto-drops its service roles (revoking the
+        # endpoint grant from app_admin); the per-app application role
+        # persists, so drop it separately.
+        ("drop service", lambda: sf.drop_service(record.service_name)),
+        ("drop application role", lambda: sf.drop_app_access_role(name)),
+        # The app's schema contains everything it owns: credential secrets
+        # (PG password, admin password, constants) and the filestorage stage.
+        # CASCADE removes them all, including the user's uploaded files; the
+        # admin UI warns about this before the delete.
+        ("drop schema", lambda: sf.drop_schema_cascade(_schema_fqn(record.app_schema))),
+    ]
+    failures = []
+    for step, run in cleanup_steps:
+        try:
+            run()
+        except Exception as exc:
+            logger.warning("delete %s: %s failed: %s", name, step, exc)
+            failures.append(step)
+    if failures:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cleanup failed ({', '.join(failures)}); retry the delete",
+        )
 
     registry.delete_app(name)

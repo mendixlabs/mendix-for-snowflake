@@ -127,6 +127,21 @@ class TestBuildSpec:
         assert resources["requests"]["memory"] == res["mem_request"]
         assert resources["limits"]["cpu"] == res["cpu_limit"]
 
+    def test_license_absent_by_default(self):
+        spec = self._spec()
+        env = spec["spec"]["containers"][0]["env"]
+        assert "RUNTIME_LICENSE_ID" not in env
+        secrets = spec["spec"]["containers"][0]["secrets"]
+        assert all(s["directoryPath"] != "/secrets/mx_license_key" for s in secrets)
+
+    def test_license_present_sets_env_and_secret_mount(self):
+        spec = self._spec(license_id="LIC-123")
+        env = spec["spec"]["containers"][0]["env"]
+        assert env["RUNTIME_LICENSE_ID"] == "LIC-123"
+        secrets = spec["spec"]["containers"][0]["secrets"]
+        entry = next(s for s in secrets if s["directoryPath"] == "/secrets/mx_license_key")
+        assert entry["snowflakeSecret"] == "TESTDB.MXAPP_MYAPP.MX_LICENSE_KEY"
+
 
 class TestLoadPgCredentials:
     def test_env_fallback_and_caching(self, monkeypatch):

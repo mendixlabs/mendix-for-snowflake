@@ -66,6 +66,16 @@ class TestRowToRecord:
         record = registry._row_to_record(row)
         assert record.use_caller_rights is False
 
+    def test_license_id_mapped(self):
+        row = self._row(LICENSE_ID="LIC-1")
+        record = registry._row_to_record(row)
+        assert record.license_id == "LIC-1"
+
+    def test_license_id_defaults_to_none(self):
+        row = self._row()
+        record = registry._row_to_record(row)
+        assert record.license_id is None
+
 
 class TestCreateApp:
     def test_insert_params_never_contain_plaintext_value(self, fake_execute_sql):
@@ -82,6 +92,19 @@ class TestCreateApp:
         assert "super-secret-value" not in json.dumps(params)
         constants_json = [p for p in params if isinstance(p, str) and "A.B" in p][0]
         assert json.loads(constants_json) == {"A.B": HIDDEN_VALUE}
+
+    def test_license_id_included_as_param(self, fake_execute_sql):
+        record = AppRecord(
+            name="myapp", service_name="MYAPP_SERVICE", app_schema="MXAPP_MYAPP",
+            pg_database="myapp_db", resource_tier="medium", use_caller_rights=False,
+            constants={}, owner_role="OWNER_ROLE", license_id="LIC-1",
+            pad_stage_path=None, endpoint_url=None, last_deploy_status="NOT_DEPLOYED",
+            created_at=None, last_deployed_at=None,
+        )
+        registry.create_app(record)
+        sql, params = fake_execute_sql.calls[0]
+        assert "license_id" in sql
+        assert "LIC-1" in params
 
 
 class TestGetApp:
@@ -117,6 +140,24 @@ class TestUpdateApp:
 
     def test_empty_dict_no_sql(self, fake_execute_sql):
         registry.update_app("myapp", {})
+        assert fake_execute_sql.calls == []
+
+    def test_license_id_field_allowed(self, fake_execute_sql):
+        registry.update_app("myapp", {"license_id": "LIC-1"})
+        sql, params = fake_execute_sql.calls[0]
+        assert "license_id = %s" in sql
+        assert params == ("LIC-1", "myapp")
+
+    def test_license_id_none_allowed_for_removal(self, fake_execute_sql):
+        registry.update_app("myapp", {"license_id": None})
+        sql, params = fake_execute_sql.calls[0]
+        assert params == (None, "myapp")
+
+    def test_license_key_rejected_as_update_column(self, fake_execute_sql):
+        # The registry never has a LICENSE_KEY column to write to: the key is a
+        # credential and only ever reaches sf.create_or_replace_secret.
+        with pytest.raises(ValueError):
+            registry.update_app("myapp", {"license_key": "x"})
         assert fake_execute_sql.calls == []
 
 

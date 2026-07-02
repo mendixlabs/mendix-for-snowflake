@@ -5,11 +5,25 @@ from pydantic import ValidationError
 
 from app.models import (
     RESOURCE_TIERS,
+    AppRecord,
     CreateAppRequest,
     ResourceTier,
     UpdateComputePoolRequest,
     UpdateConstantsRequest,
+    UpdateLicenseRequest,
 )
+
+
+def _make_record(**overrides):
+    defaults = dict(
+        name="myapp", service_name="MYAPP_SERVICE", app_schema="MXAPP_MYAPP",
+        pg_database="myapp_db", resource_tier="medium", use_caller_rights=False,
+        constants={}, owner_role="OWNER_ROLE",
+        pad_stage_path=None, endpoint_url=None, last_deploy_status="READY",
+        created_at=None, last_deployed_at=None,
+    )
+    defaults.update(overrides)
+    return AppRecord(**defaults)
 
 
 def _make(**overrides):
@@ -96,3 +110,56 @@ class TestUpdateComputePoolRequest:
 def test_resource_tiers_has_exactly_three_keys():
     assert set(RESOURCE_TIERS.keys()) == set(ResourceTier)
     assert len(RESOURCE_TIERS) == 3
+
+
+class TestCreateAppRequestLicense:
+    def test_both_fields_accepted(self):
+        req = _make(license_id="LIC-1", license_key="key-value")
+        assert req.license_id == "LIC-1"
+        assert req.license_key == "key-value"
+
+    def test_neither_field_accepted(self):
+        req = _make()
+        assert req.license_id is None
+        assert req.license_key is None
+
+    def test_license_id_without_key_rejected(self):
+        with pytest.raises(ValidationError):
+            _make(license_id="LIC-1")
+
+    def test_license_key_without_id_rejected(self):
+        with pytest.raises(ValidationError):
+            _make(license_key="key-value")
+
+
+class TestUpdateLicenseRequest:
+    def test_valid(self):
+        req = UpdateLicenseRequest(license_id="LIC-1", license_key="key-value")
+        assert req.license_id == "LIC-1"
+        assert req.license_key == "key-value"
+
+    def test_empty_license_id_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateLicenseRequest(license_id="", license_key="key-value")
+
+    def test_empty_license_key_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateLicenseRequest(license_id="LIC-1", license_key="")
+
+
+class TestAppRecordLicensed:
+    def test_licensed_false_when_no_license_id(self):
+        record = _make_record()
+        assert record.license_id is None
+        assert record.licensed is False
+
+    def test_licensed_true_when_license_id_set(self):
+        record = _make_record(license_id="LIC-1")
+        assert record.licensed is True
+
+    def test_serialized_record_has_license_id_and_licensed_no_license_key(self):
+        record = _make_record(license_id="LIC-1")
+        dumped = record.model_dump()
+        assert dumped["license_id"] == "LIC-1"
+        assert dumped["licensed"] is True
+        assert "license_key" not in dumped

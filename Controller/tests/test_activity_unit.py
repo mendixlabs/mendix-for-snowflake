@@ -26,19 +26,19 @@ class TestDeriveAction:
     def test_update_spec(self):
         assert activity.derive_action("PUT", "/apps/myapp/spec") == ("update_spec", "myapp")
 
+    def test_update_license_put(self):
+        assert activity.derive_action("PUT", "/apps/myapp/license") == ("update_license", "myapp")
+
+    def test_update_license_delete(self):
+        assert activity.derive_action("DELETE", "/apps/myapp/license") == ("update_license", "myapp")
+
     def test_delete(self):
         assert activity.derive_action("DELETE", "/apps/myapp") == ("delete", "myapp")
 
     def test_resize_compute_pool(self):
-        # BUG (found by this suite, not fixed per scope: no app-code changes):
-        # the "/system/compute-pool" pattern in _ACTION_PATTERNS has no capture
-        # group, but derive_action unconditionally calls m.group(1). Every
-        # PATCH /system/compute-pool trips this in main.py's log_operator
-        # middleware (after call_next has already produced the response),
-        # turning a successful 202 into an unhandled 500 for the caller.
-        import pytest
-        with pytest.raises(IndexError):
-            activity.derive_action("PATCH", "/system/compute-pool")
+        # The compute-pool pattern has no app-name capture group.
+        assert activity.derive_action("PATCH", "/system/compute-pool") == \
+            ("resize_compute_pool", None)
 
     def test_unknown_path(self):
         assert activity.derive_action("GET", "/nonsense") == ("unknown", None)

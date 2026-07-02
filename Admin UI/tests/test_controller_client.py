@@ -208,6 +208,24 @@ class TestEndpointSmokeTests:
         assert req.method == "PUT"
         assert req.url.path == "/apps/myapp/spec"
 
+    def test_update_license(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        client.update_license("myapp", "LIC-1", "secret-key")
+        import json
+        req = handler.requests[0]
+        assert req.method == "PUT"
+        assert req.url.path == "/apps/myapp/license"
+        assert json.loads(req.content) == {"license_id": "LIC-1", "license_key": "secret-key"}
+
+    def test_delete_license(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        client.delete_license("myapp")
+        req = handler.requests[0]
+        assert req.method == "DELETE"
+        assert req.url.path == "/apps/myapp/license"
+
     def test_list_activity_params_only_set_filters(self, mock_controller, recording_handler):
         handler = recording_handler(_ok([]))
         client = mock_controller(handler)

@@ -54,7 +54,8 @@ def derive_action(method: str, path: str) -> tuple[str, Optional[str]]:
     for pattern, action in _ACTION_PATTERNS:
         m = pattern.match(path)
         if m:
-            return (action, m.group(1))
+            # System-level patterns (compute-pool) carry no app-name group.
+            return (action, m.group(1) if m.groups() else None)
     return ("unknown", None)
 
 

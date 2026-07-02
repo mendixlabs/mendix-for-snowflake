@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 import yaml
 
 from app.models import HIDDEN_VALUE
@@ -83,6 +82,27 @@ class TestCreateAppHappyPath:
                            json=_create_payload(name="1-bad-name"))
         assert resp.status_code == 422
 
+    def test_license_fields_write_secret_and_store_id(self, client, fake_sf, fake_registry, role_headers):
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),
+                           json=_create_payload(license_id="LIC-1", license_key="secret-key-val"))
+        assert resp.status_code == 201
+        secret_calls = {args[0]: args[1] for (args, kw) in fake_sf.calls_for("create_or_replace_secret")}
+        assert secret_calls["TESTDB.MXAPP_MYAPP.MX_LICENSE_KEY"] == "secret-key-val"
+        record = fake_registry.get_app("myapp")
+        assert record.license_id == "LIC-1"
+
+    def test_no_license_fields_no_secret_no_id(self, client, fake_sf, fake_registry, role_headers):
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 201
+        secret_names = {args[0] for (args, kw) in fake_sf.calls_for("create_or_replace_secret")}
+        assert "TESTDB.MXAPP_MYAPP.MX_LICENSE_KEY" not in secret_names
+        assert fake_registry.get_app("myapp").license_id is None
+
+    def test_exactly_one_license_field_422(self, client, role_headers):
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),
+                           json=_create_payload(license_id="LIC-1"))
+        assert resp.status_code == 422
+
 
 class TestGetApp:
     def test_response_shape(self, client, fake_sf, fake_registry, make_record, role_headers):
@@ -145,17 +165,30 @@ class TestDeleteApp:
         assert fake_sf.calls_for("drop_schema_cascade")
         assert fake_registry.get_app("myapp") is None
 
-    def test_drop_service_failure_not_tolerated(self, client, fake_sf, fake_registry, make_record, role_headers):
-        # Discrepancy vs the original plan: only suspend_service (+ its poll) is
-        # wrapped in try/except in delete_app. drop_service / drop_app_access_role /
-        # drop_schema_cascade / registry.delete_app are NOT best-effort; an
-        # exception here is not an HTTPException, so it propagates through the
-        # route and (with the default raise_server_exceptions=True TestClient)
-        # surfaces here rather than as a handled error response.
+    def test_drop_failure_returns_502_and_keeps_record(self, client, fake_sf, fake_registry, make_record, role_headers):
+        # A cleanup failure must produce a handled, retryable error: the
+        # remaining steps are still attempted (all drops are IF EXISTS), and
+        # the registry row survives as the operator's handle for retrying.
         record = make_record(name="myapp", owner_role="OWNER_ROLE")
         fake_registry.add(record)
         fake_sf.service_statuses[record.service_name] = "SUSPENDED"
         fake_sf.raise_on["drop_service"] = RuntimeError("drop boom")
-        with pytest.raises(RuntimeError):
-            client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
-        assert fake_registry.get_app("myapp") is not None  # registry.delete_app never reached
+        resp = client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 502
+        assert "drop service" in resp.json()["detail"]
+        # Later steps were still attempted despite the earlier failure.
+        assert fake_sf.calls_for("drop_app_access_role")
+        assert fake_sf.calls_for("drop_schema_cascade")
+        assert fake_registry.get_app("myapp") is not None
+
+    def test_failed_delete_can_be_retried(self, client, fake_sf, fake_registry, make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE")
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+        fake_sf.raise_on["drop_schema_cascade"] = RuntimeError("schema boom")
+        assert client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE")).status_code == 502
+        assert fake_registry.get_app("myapp") is not None
+        del fake_sf.raise_on["drop_schema_cascade"]
+        resp = client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 204
+        assert fake_registry.get_app("myapp") is None

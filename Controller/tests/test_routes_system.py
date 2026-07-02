@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 
 class TestSystemLogs:
     def test_unknown_target_404(self, client, fake_sf, role_headers):
@@ -44,29 +42,22 @@ class TestGetComputePool:
 
 
 class TestUpdateComputePool:
-    # BUG (found by this suite; not fixed, per scope: no app-code changes):
-    # activity.derive_action's "/system/compute-pool" regex has no capture
-    # group, but derive_action unconditionally calls m.group(1). main.py's
-    # log_operator middleware calls derive_action for every mutating request
-    # (PATCH included) *after* call_next has already produced the response,
-    # so every PATCH /system/compute-pool - regardless of whether the route
-    # itself would 400/422/202 - raises an unhandled IndexError in the
-    # middleware. With the default TestClient(raise_server_exceptions=True)
-    # that exception propagates to the caller instead of any HTTP response.
-    # See test_activity_unit.py::TestDeriveAction::test_resize_compute_pool.
-    def test_all_none_body_raises_middleware_bug(self, client, fake_sf, role_headers):
-        with pytest.raises(IndexError):
-            client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"), json={})
+    def test_all_none_body_400(self, client, fake_sf, role_headers):
+        resp = client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"), json={})
+        assert resp.status_code == 400
+        assert fake_sf.calls_for("alter_compute_pool") == []
 
-    def test_partial_body_raises_middleware_bug(self, client, fake_sf, role_headers):
-        with pytest.raises(IndexError):
-            client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"),
-                         json={"min_nodes": 2})
+    def test_partial_body_alters_and_returns_refreshed_pool(self, client, fake_sf, role_headers):
+        resp = client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"),
+                            json={"min_nodes": 2})
+        assert resp.status_code == 200
+        args, kwargs = fake_sf.calls_for("alter_compute_pool")[0]
+        assert args[0] == "TEST_POOL"
+        assert kwargs == {"min_nodes": 2, "max_nodes": None, "auto_suspend_secs": None}
+        assert resp.json() == fake_sf.compute_pool
 
-    def test_out_of_bounds_still_422_before_middleware_runs(self, client, fake_sf, role_headers):
-        # Pydantic validation (422) happens before the route body executes, and
-        # a 422 response still counts as a "mutation" for the middleware, so
-        # this ALSO trips the same bug rather than cleanly returning 422.
-        with pytest.raises(IndexError):
-            client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"),
-                         json={"min_nodes": 99})
+    def test_out_of_bounds_422(self, client, fake_sf, role_headers):
+        resp = client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"),
+                            json={"min_nodes": 99})
+        assert resp.status_code == 422
+        assert fake_sf.calls_for("alter_compute_pool") == []
