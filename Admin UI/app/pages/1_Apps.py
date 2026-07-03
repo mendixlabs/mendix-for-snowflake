@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from auth import client
+from auth import client, operator_roles
 from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
@@ -346,12 +346,24 @@ def _detail_panel(selected_name: str) -> None:
             "user's next login. Saving or removing the mapping restarts the service."
         )
 
+        available_roles = sorted(operator_roles())
+        if available_roles:
+            shown_roles = available_roles[:10]
+            roles_line = "Your available Snowflake account roles: " + ", ".join(f"`{r}`" for r in shown_roles)
+            if len(available_roles) > len(shown_roles):
+                roles_line += f" (+{len(available_roles) - len(shown_roles)} more)"
+            st.caption(roles_line)
+
         current_mapping = record.get("role_mapping") or {}
         rolemap_key = f"rolemap-{selected_name}"
         # Same seed-once pattern as the Constants editor above: seed session_state
         # directly rather than passing value= to a keyed widget in this fragment.
         if rolemap_key not in st.session_state:
-            st.session_state[rolemap_key] = json.dumps(current_mapping, indent=2)
+            if not current_mapping and ur:
+                seed = {f"<SNOWFLAKE_ROLE_FOR_{role.upper().replace(' ', '_')}>": role for role in ur}
+            else:
+                seed = current_mapping
+            st.session_state[rolemap_key] = json.dumps(seed, indent=2)
         edited_mapping = st.text_area(
             "Role mapping (JSON object: Snowflake account role -> Mendix userrole)",
             height=200,
@@ -373,6 +385,9 @@ def _detail_panel(selected_name: str) -> None:
         if mapping_parse_error:
             st.error(mapping_parse_error)
         elif parsed_mapping is not None:
+            if any(k.startswith("<SNOWFLAKE_ROLE_FOR_") for k in parsed_mapping):
+                st.warning("Replace the `<SNOWFLAKE_ROLE_FOR_...>` placeholder keys with real "
+                          "Snowflake account role names before saving.")
             mapping_diff_lines = _diff_constants(current_mapping, parsed_mapping)
             if mapping_diff_lines:
                 st.caption("Pending changes:")
