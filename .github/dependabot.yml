@@ -1,0 +1,18 @@
+# Weekly dependency-update PRs; complements the point-in-time pip-audit and
+# Trivy scans in .github/workflows/security-scan.yml.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/Controller"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "pip"
+    directory: "/Admin UI"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
