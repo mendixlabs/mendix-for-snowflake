@@ -1,6 +1,6 @@
 fastapi==0.138.2
 starlette>=1.0.1
 uvicorn[standard]==0.29.0
-snowflake-connector-python==4.6.0
+snowflake-connector-python==4.7.0
 pydantic==2.13.4
 PyYAML==6.0.1
