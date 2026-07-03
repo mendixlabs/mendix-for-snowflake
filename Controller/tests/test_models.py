@@ -11,6 +11,7 @@ from app.models import (
     UpdateComputePoolRequest,
     UpdateConstantsRequest,
     UpdateLicenseRequest,
+    UpdateRoleMappingRequest,
 )
 
 
@@ -163,3 +164,72 @@ class TestAppRecordLicensed:
         assert dumped["license_id"] == "LIC-1"
         assert dumped["licensed"] is True
         assert "license_key" not in dumped
+
+
+class TestAppRecordRoleMappingDefaults:
+    def test_user_roles_defaults_to_empty_list(self):
+        record = _make_record()
+        assert record.user_roles == []
+
+    def test_role_mapping_defaults_to_empty_dict(self):
+        record = _make_record()
+        assert record.role_mapping == {}
+
+    def test_explicit_values_round_trip(self):
+        record = _make_record(user_roles=["User", "Administrator"], role_mapping={"ROLE_A": "Administrator"})
+        assert record.user_roles == ["User", "Administrator"]
+        assert record.role_mapping == {"ROLE_A": "Administrator"}
+
+
+class TestUpdateRoleMappingRequest:
+    def test_keys_uppercased(self):
+        req = UpdateRoleMappingRequest(role_mapping={"my_role": "Administrator"})
+        assert req.role_mapping == {"MY_ROLE": "Administrator"}
+
+    def test_values_not_uppercased(self):
+        req = UpdateRoleMappingRequest(role_mapping={"role_a": "Administrator"})
+        assert req.role_mapping["ROLE_A"] == "Administrator"
+
+    def test_strips_whitespace(self):
+        req = UpdateRoleMappingRequest(role_mapping={" role_a ": " Administrator "})
+        assert req.role_mapping == {"ROLE_A": "Administrator"}
+
+    def test_empty_mapping_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={})
+
+    def test_more_than_fifty_entries_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={f"role_{i}": "User" for i in range(51)})
+
+    def test_empty_key_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"": "User"})
+
+    def test_empty_value_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"role_a": ""})
+
+    def test_key_too_long_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"x" * 256: "User"})
+
+    def test_value_too_long_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"role_a": "x" * 201})
+
+    def test_control_char_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"role_a": "bad\nrole"})
+
+    def test_single_quote_in_value_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"role_a": "bad'role"})
+
+    def test_double_quote_in_value_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"role_a": 'bad"role'})
+
+    def test_duplicate_after_uppercasing_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateRoleMappingRequest(role_mapping={"role_a": "User", "ROLE_A": "Administrator"})

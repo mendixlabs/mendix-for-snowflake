@@ -323,6 +323,105 @@ def _detail_panel(selected_name: str) -> None:
                 except ControllerError as e:
                     st.error(str(e))
 
+    with st.expander("End-user role mapping"):
+        if not record.get("use_caller_rights"):
+            st.warning(
+                "Role mapping requires caller's rights (executeAsCaller), which is "
+                "currently OFF for this app. End-users always get the default "
+                "userrole until it is enabled in the Service spec expander below. "
+                "The mapping is still saved and takes effect once caller's rights "
+                "is turned on."
+            )
+
+        ur = record.get("user_roles") or []
+        if ur:
+            st.caption("Userroles detected in the deployed PAD: " + ", ".join(f"`{r}`" for r in ur))
+        else:
+            st.caption("No PAD deployed yet; mapping values cannot be validated against detected userroles.")
+
+        st.caption(
+            "Keys are Snowflake account role names (stored uppercase). A user "
+            "holding several mapped roles gets all of the mapped userroles; a "
+            "user holding none gets the default userrole. Changes apply at the "
+            "user's next login. Saving or removing the mapping restarts the service."
+        )
+
+        current_mapping = record.get("role_mapping") or {}
+        rolemap_key = f"rolemap-{selected_name}"
+        # Same seed-once pattern as the Constants editor above: seed session_state
+        # directly rather than passing value= to a keyed widget in this fragment.
+        if rolemap_key not in st.session_state:
+            st.session_state[rolemap_key] = json.dumps(current_mapping, indent=2)
+        edited_mapping = st.text_area(
+            "Role mapping (JSON object: Snowflake account role -> Mendix userrole)",
+            height=200,
+            key=rolemap_key,
+        )
+
+        parsed_mapping: dict | None = None
+        mapping_parse_error: str | None = None
+        try:
+            candidate = json.loads(edited_mapping)
+            if isinstance(candidate, dict):
+                parsed_mapping = candidate
+            else:
+                mapping_parse_error = "Role mapping must be a JSON object."
+        except json.JSONDecodeError as e:
+            mapping_parse_error = f"Invalid JSON: {e}"
+
+        mapping_diff_lines: list[str] = []
+        if mapping_parse_error:
+            st.error(mapping_parse_error)
+        elif parsed_mapping is not None:
+            mapping_diff_lines = _diff_constants(current_mapping, parsed_mapping)
+            if mapping_diff_lines:
+                st.caption("Pending changes:")
+                st.code("\n".join(mapping_diff_lines), language="diff")
+            else:
+                st.caption("No changes to apply.")
+            if ur:
+                unmapped_targets = sorted(set(parsed_mapping.values()) - set(ur))
+                if unmapped_targets:
+                    st.warning(
+                        "These target userroles are not in the detected list and "
+                        "will be rejected by the server: " + ", ".join(f"`{r}`" for r in unmapped_targets)
+                    )
+
+        mapping_save_disabled = (
+            deploy_status in _TRANSIENT
+            or parsed_mapping is None
+            or not mapping_diff_lines
+        )
+        if st.button("Save role mapping", key=f"rolemap-save-{selected_name}",
+                     disabled=mapping_save_disabled):
+            try:
+                resp = client().update_role_mapping(selected_name, parsed_mapping)
+                for w in resp.get("warnings") or []:
+                    st.warning(w)
+                _refresh_now()
+                st.success("Role mapping saved. Service is restarting.")
+                st.rerun()
+            except ControllerError as e:
+                st.error(str(e))
+
+        if current_mapping:
+            rolemap_remove_confirm = st.checkbox(
+                "Confirm removal (end-users revert to the default userrole after restart)",
+                key=f"rolemap-remove-confirm-{selected_name}",
+            )
+            if st.button(
+                "Remove role mapping",
+                key=f"rolemap-remove-{selected_name}",
+                disabled=(deploy_status in _TRANSIENT or not rolemap_remove_confirm),
+            ):
+                try:
+                    client().delete_role_mapping(selected_name)
+                    _refresh_now()
+                    st.success("Role mapping removed. Service is restarting.")
+                    st.rerun()
+                except ControllerError as e:
+                    st.error(str(e))
+
     with st.expander("Service spec"):
         st.warning(
             "Editing the spec restarts the service. Active end-user sessions on "

@@ -6,11 +6,15 @@ extracted PAD directory, returning only constants that appear in both files.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
+
+logger = logging.getLogger(__name__)
 
 # A Mendix constant's qualified name (Module.Constant) is always a dotted
 # identifier. We turn it into a Snowflake secret identifier (MX_CONST_...), so it
@@ -18,6 +22,11 @@ from typing import IO
 # Enforced here (PAD is untrusted input) and re-used by the API models.
 CONSTANT_NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_.]*$"
 _CONSTANT_NAME_RE = re.compile(CONSTANT_NAME_PATTERN)
+
+# Mendix userrole names may contain spaces, so this is a length/safety cap, not
+# an identifier pattern. Also re-used by UpdateRoleMappingRequest in models.py.
+USER_ROLE_NAME_MAX = 200
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 @dataclass
@@ -107,3 +116,58 @@ def parse_from_zip(zip_path: str | Path) -> list[PadConstant]:
         defaults = _parse_defaults(defaults_text)
         env_vars = _parse_variables(variables_text)
         return _build_constants(defaults, env_vars)
+
+
+def _valid_user_role_name(name: str) -> bool:
+    if not name or len(name) > USER_ROLE_NAME_MAX:
+        return False
+    if _CONTROL_CHAR_RE.search(name):
+        return False
+    # Quotes would break out of the Java XPath lookup
+    # //System.UserRole[Name='...'] in HeaderSSOHandler.java; reject them here
+    # rather than trusting every downstream consumer to escape correctly.
+    if "'" in name or '"' in name:
+        return False
+    return True
+
+
+def parse_user_roles_from_zip(zip_path: str | Path) -> list[str]:
+    """Userrole names from model/metadata.json inside the PAD, [] on any problem.
+
+    Role detection is auxiliary (it only pre-populates the role-mapping UI and
+    validates mapping targets), so any failure here must never fail a deploy.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            candidates = [
+                n for n in names
+                if n == "model/metadata.json" or n.endswith("/model/metadata.json")
+            ]
+            if not candidates:
+                return []
+            candidates.sort(key=len)
+            with zf.open(candidates[0]) as f:
+                data = json.loads(f.read().decode("utf-8"))
+
+            roles = data.get("Roles") or {}
+            result: list[str] = []
+            seen: set[str] = set()
+            for value in roles.values():
+                if not isinstance(value, dict):
+                    continue
+                raw_name = value.get("Name")
+                if not isinstance(raw_name, str):
+                    continue
+                name = raw_name.strip()
+                if not _valid_user_role_name(name):
+                    logger.warning("Skipping invalid userrole name from PAD metadata.json: %r", raw_name)
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                result.append(name)
+            return result
+    except Exception:
+        logger.warning("Failed to parse userroles from %s", zip_path, exc_info=True)
+        return []

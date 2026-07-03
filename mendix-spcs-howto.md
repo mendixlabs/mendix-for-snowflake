@@ -19,7 +19,9 @@ REST API. For everything else:
 2. Copy `App Components/login.html` to `theme/web/` (replaces default login page with Snowflake SSO redirect)
 3. Add `Snippet_TriggerSFTokenRefresh` to your Main Layout (keeps the caller token fresh)
 4. Set `SnowflakeSSO.ASu_RegisterSnowflakeSSO` as the project's After Startup microflow
-5. Map the `SnowflakeSSO.User` module role to all user roles that can log in
+5. Map the `SnowflakeSSO.User` module role to all user roles that can log in, including every
+   userrole named as a target in an [end-user role mapping](#end-user-role-mapping) - the module
+   syncs a user's Mendix userroles from `MX_ROLE_MAPPING` at each login
 
 The module reads the `Sf-Context-Current-User` header injected by SPCS, auto-logs users in
 under their Snowflake identity, and captures the caller token for querying Snowflake data as
@@ -113,6 +115,36 @@ restart.
 
 ---
 
+## End-user role mapping
+
+Maps Snowflake account roles to Mendix userroles, so end-users of a deployed app can be given
+more than the static default userrole (`User`). Requires `use_caller_rights=true`: the SnowflakeSSO
+module resolves an end-user's account roles via a compound-token session, which needs the caller
+token that only an `executeAsCaller` service receives. The mapping stays configurable regardless;
+the UI and API warn when it is inert.
+
+**Where to set it:** the **End-user role mapping** section on the Apps page detail panel, or
+`PUT`/`DELETE /apps/{name}/role-mapping` directly (below).
+
+**Keys and values:** keys are Snowflake account role names, stored uppercase (Snowflake role
+names are case-insensitive identifiers - quoted mixed-case roles are unsupported). Values are
+Mendix userrole names, validated at deploy time against the PAD's `model/metadata.json`. Only
+**account** roles are detectable (`CURRENT_AVAILABLE_ROLES()`); Snowflake **application** roles
+cannot be mapped, since `IS_APPLICATION_ROLE_IN_SESSION` only works inside app-owned SQL context.
+
+**What happens:** the mapping is not a secret. It is stored unmasked on the registry row and
+delivered to the container as a plain `MX_ROLE_MAPPING` env var (compact JSON), visible in the
+Service spec expander like any other setting. A user holding several mapped roles gets all of
+the corresponding userroles; a user holding none of the mapped roles falls back to the default
+userrole, with a log line - login is never denied by the mapping. Role sync happens once per
+login, before the Mendix session is initialized, so a role change takes effect at the user's
+*next* login, not mid-session. Saving or removing the mapping restarts the service.
+
+**Removing the mapping** (`DELETE /apps/{name}/role-mapping`) reverts every login to the static
+default userrole.
+
+---
+
 ## Access Model
 
 **Management plane** (who may deploy and manage an app): each app row has an `owner_role`. An
@@ -171,6 +203,8 @@ for `PRIVILEGED_ROLES` members.
 | `PUT /apps/{name}/spec` | Change resource tier / caller's rights (202, restarts) |
 | `PUT /apps/{name}/license` | Set the Mendix license (license_id + license_key; 202, restarts) |
 | `DELETE /apps/{name}/license` | Remove the license, revert to trial (202, restarts) |
+| `PUT /apps/{name}/role-mapping` | Set/replace the Snowflake role -> Mendix userrole mapping (202, restarts) |
+| `DELETE /apps/{name}/role-mapping` | Clear the role mapping, revert to the default userrole (202, restarts) |
 | `POST /apps/{name}/suspend` / `resume` | Suspend or resume the service (202) |
 | `DELETE /apps/{name}` | Drop the service, access role, per-app secrets, and registry row |
 | `GET /apps/{name}/logs` | App container logs |

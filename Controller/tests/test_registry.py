@@ -76,6 +76,36 @@ class TestRowToRecord:
         record = registry._row_to_record(row)
         assert record.license_id is None
 
+    def test_user_roles_string_json_decoded(self):
+        row = self._row(USER_ROLES='["User", "Administrator"]')
+        record = registry._row_to_record(row)
+        assert record.user_roles == ["User", "Administrator"]
+
+    def test_user_roles_native_passed_through(self):
+        row = self._row(USER_ROLES=["User"])
+        record = registry._row_to_record(row)
+        assert record.user_roles == ["User"]
+
+    def test_user_roles_none_becomes_empty_list(self):
+        row = self._row(USER_ROLES=None)
+        record = registry._row_to_record(row)
+        assert record.user_roles == []
+
+    def test_role_mapping_string_json_decoded(self):
+        row = self._row(ROLE_MAPPING='{"ROLE_A": "Administrator"}')
+        record = registry._row_to_record(row)
+        assert record.role_mapping == {"ROLE_A": "Administrator"}
+
+    def test_role_mapping_native_passed_through(self):
+        row = self._row(ROLE_MAPPING={"ROLE_A": "Administrator"})
+        record = registry._row_to_record(row)
+        assert record.role_mapping == {"ROLE_A": "Administrator"}
+
+    def test_role_mapping_none_becomes_empty_dict(self):
+        row = self._row(ROLE_MAPPING=None)
+        record = registry._row_to_record(row)
+        assert record.role_mapping == {}
+
 
 class TestCreateApp:
     def test_insert_params_never_contain_plaintext_value(self, fake_execute_sql):
@@ -159,6 +189,30 @@ class TestUpdateApp:
         with pytest.raises(ValueError):
             registry.update_app("myapp", {"license_key": "x"})
         assert fake_execute_sql.calls == []
+
+    def test_role_mapping_routed_through_parse_json_unmasked(self, fake_execute_sql):
+        registry.update_app("myapp", {"role_mapping": {"ROLE_A": "Administrator"}})
+        sql, params = fake_execute_sql.calls[0]
+        assert "role_mapping = PARSE_JSON(%s)" in sql
+        assert json.loads(params[0]) == {"ROLE_A": "Administrator"}
+
+    def test_role_mapping_none_binds_sql_null(self, fake_execute_sql):
+        registry.update_app("myapp", {"role_mapping": None})
+        sql, params = fake_execute_sql.calls[0]
+        assert "role_mapping = %s" in sql
+        assert params == (None, "myapp")
+
+    def test_user_roles_routed_through_parse_json(self, fake_execute_sql):
+        registry.update_app("myapp", {"user_roles": ["User", "Administrator"]})
+        sql, params = fake_execute_sql.calls[0]
+        assert "user_roles = PARSE_JSON(%s)" in sql
+        assert json.loads(params[0]) == ["User", "Administrator"]
+
+    def test_user_roles_none_binds_sql_null(self, fake_execute_sql):
+        registry.update_app("myapp", {"user_roles": None})
+        sql, params = fake_execute_sql.calls[0]
+        assert "user_roles = %s" in sql
+        assert params == (None, "myapp")
 
 
 class TestDeleteApp:

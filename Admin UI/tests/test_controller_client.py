@@ -226,6 +226,24 @@ class TestEndpointSmokeTests:
         assert req.method == "DELETE"
         assert req.url.path == "/apps/myapp/license"
 
+    def test_update_role_mapping(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING", "warnings": []}, status=202))
+        client = mock_controller(handler)
+        client.update_role_mapping("myapp", {"ROLE_A": "Administrator"})
+        import json
+        req = handler.requests[0]
+        assert req.method == "PUT"
+        assert req.url.path == "/apps/myapp/role-mapping"
+        assert json.loads(req.content) == {"role_mapping": {"ROLE_A": "Administrator"}}
+
+    def test_delete_role_mapping(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        client.delete_role_mapping("myapp")
+        req = handler.requests[0]
+        assert req.method == "DELETE"
+        assert req.url.path == "/apps/myapp/role-mapping"
+
     def test_list_activity_params_only_set_filters(self, mock_controller, recording_handler):
         handler = recording_handler(_ok([]))
         client = mock_controller(handler)

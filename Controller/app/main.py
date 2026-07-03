@@ -25,9 +25,10 @@ from .models import (
     UpdateComputePoolRequest,
     UpdateConstantsRequest,
     UpdateLicenseRequest,
+    UpdateRoleMappingRequest,
     UpdateSpecRequest,
 )
-from .pad_parser import PadConstant, parse_from_zip
+from .pad_parser import PadConstant, parse_from_zip, parse_user_roles_from_zip
 
 
 @asynccontextmanager
@@ -175,6 +176,7 @@ def _build_spec(
     constants: list[PadConstant],
     use_caller_rights: bool,
     license_id: str | None = None,
+    role_mapping: dict[str, str] | None = None,
 ) -> str:
     res = RESOURCE_TIERS[resource_tier]
     pg_host_port = _pg_host()
@@ -216,6 +218,11 @@ def _build_spec(
             "snowflakeSecret": _secret_fqn(app_schema, "MX_LICENSE_KEY"),
             "directoryPath": "/secrets/mx_license_key",
         })
+    if role_mapping:
+        # Not a secret: operator-visible mapping of Snowflake account roles to Mendix
+        # userroles, consumed by the SnowflakeSSO module at login. Compact and sorted
+        # so the spec is deterministic.
+        env["MX_ROLE_MAPPING"] = json.dumps(role_mapping, separators=(",", ":"), sort_keys=True)
 
     spec: dict = {
         "spec": {
@@ -521,8 +528,9 @@ def update_compute_pool(req: UpdateComputePoolRequest, roles: set[str] = Depends
 
 def _prepare_deploy(
     name: str, pad_path: str
-) -> tuple[AppRecord, list[PadConstant], dict]:
-    """Parse and validate a PAD. Returns (record, pad_constants, new_constants). Raises HTTPException on error."""
+) -> tuple[AppRecord, list[PadConstant], dict, list[str]]:
+    """Parse and validate a PAD. Returns (record, pad_constants, new_constants,
+    user_roles). Raises HTTPException on error."""
     record = registry.get_app(name)
     if not record:
         raise HTTPException(status_code=404, detail=f"App '{name}' not found")
@@ -541,7 +549,16 @@ def _prepare_deploy(
         if c.name not in new_constants:
             new_constants[c.name] = c.default
 
-    return record, pad_constants, new_constants
+    user_roles = parse_user_roles_from_zip(pad_path)
+    if record.role_mapping and user_roles:
+        orphaned = sorted(set(record.role_mapping.values()) - set(user_roles))
+        if orphaned:
+            logger.warning(
+                "App %s: role_mapping targets userroles not in the redeployed PAD: %s",
+                name, orphaned,
+            )
+
+    return record, pad_constants, new_constants, user_roles
 
 
 def _stamp_deploy_success(name: str, service_name: str, extra: dict | None = None) -> None:
@@ -560,7 +577,8 @@ def _stamp_deploy_success(name: str, service_name: str, extra: dict | None = Non
 
 
 def _run_deploy(name: str, pad_path: str, record: AppRecord,
-                pad_constants: list[PadConstant], new_constants: dict) -> None:
+                pad_constants: list[PadConstant], new_constants: dict,
+                user_roles: list[str]) -> None:
     """Background deploy task. registry status must be set to DEPLOYING before calling."""
     try:
         stored = record.constants or {}
@@ -576,7 +594,8 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
             # fix in _run_update_constants).
             registry.update_app(name, {"constants": new_constants})
             spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                               _constants_from_dict(new_constants), record.use_caller_rights, record.license_id)
+                               _constants_from_dict(new_constants), record.use_caller_rights, record.license_id,
+                               record.role_mapping)
             sf.alter_service_spec(record.service_name, spec)
         else:
             sf.suspend_service(record.service_name)
@@ -591,6 +610,7 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
         _stamp_deploy_success(name, record.service_name, {
             "constants": new_constants,
             "pad_stage_path": f"apps/{name}/current.zip",
+            "user_roles": user_roles,
         })
     except Exception:
         try:
@@ -634,9 +654,9 @@ def trigger_deploy(name: str, background_tasks: BackgroundTasks,
             status_code=400,
             detail=f"No PAD (.zip) found at stage path apps/{name}/ — upload it first.",
         )
-    record, pad_constants, new_constants = _prepare_deploy(name, pad_path)
+    record, pad_constants, new_constants, user_roles = _prepare_deploy(name, pad_path)
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
-    background_tasks.add_task(_run_deploy, name, pad_path, record, pad_constants, new_constants)
+    background_tasks.add_task(_run_deploy, name, pad_path, record, pad_constants, new_constants, user_roles)
     return {"status": "DEPLOYING"}
 
 
@@ -649,7 +669,7 @@ def _run_update_constants(name: str, service_name: str, merged: dict,
     registry.update_app(name, {"constants": merged})
     try:
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                           constants, record.use_caller_rights, record.license_id)
+                           constants, record.use_caller_rights, record.license_id, record.role_mapping)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -699,7 +719,7 @@ def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, new_tier, constants_list, new_caller,
-                           record.license_id)
+                           record.license_id, record.role_mapping)
         sf.alter_service_spec(record.service_name, spec)
         if caller_flipping_on:
             sf.set_caller_token_validity(record.service_name, 1800)
@@ -746,7 +766,7 @@ def _run_update_license(name: str, service_name: str, record: AppRecord, license
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                           constants_list, record.use_caller_rights, license_id)
+                           constants_list, record.use_caller_rights, license_id, record.role_mapping)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -779,7 +799,7 @@ def _run_delete_license(name: str, service_name: str, record: AppRecord) -> None
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                           constants_list, record.use_caller_rights, None)
+                           constants_list, record.use_caller_rights, None, record.role_mapping)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -800,6 +820,85 @@ def delete_license(name: str, background_tasks: BackgroundTasks,
     record = _record_for_mutation(name, roles)
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
     background_tasks.add_task(_run_delete_license, name, record.service_name, record)
+    return {"status": "DEPLOYING"}
+
+
+def _run_update_role_mapping(name: str, service_name: str, record: AppRecord,
+                             role_mapping: dict[str, str]) -> None:
+    """Persist up front (same ordering as license_id), rebuild the spec with
+    MX_ROLE_MAPPING, restart so the SSO handler sees it at next login."""
+    registry.update_app(name, {"role_mapping": role_mapping})
+    try:
+        constants_list = _constants_from_dict(record.constants or {})
+        spec = _build_spec(name, record.app_schema, record.pg_database,
+                           ResourceTier(record.resource_tier), constants_list,
+                           record.use_caller_rights, record.license_id, role_mapping)
+        sf.alter_service_spec(service_name, spec)
+        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+            return
+        _stamp_deploy_success(name, service_name)
+    except Exception:
+        try:
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+        except Exception:
+            pass
+        logger.exception("Role mapping update failed for %s", name)
+
+
+@app.put("/apps/{name}/role-mapping", status_code=202)
+def update_role_mapping(name: str, req: UpdateRoleMappingRequest,
+                        background_tasks: BackgroundTasks,
+                        roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
+    if record.user_roles:
+        unknown = sorted(set(req.role_mapping.values()) - set(record.user_roles))
+        if unknown:
+            raise HTTPException(status_code=422, detail={
+                "detail": "Mapping targets userroles not present in the deployed PAD",
+                "unknown_userroles": unknown,
+                "detected_userroles": record.user_roles,
+            })
+    warnings = []
+    if not record.user_roles:
+        warnings.append("No userroles detected yet (no PAD deployed); mapping values are unvalidated.")
+    if not record.use_caller_rights:
+        warnings.append("use_caller_rights is off: no caller token reaches the app, so the "
+                        "mapping is inert and all users get the default role until it is enabled.")
+    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    background_tasks.add_task(_run_update_role_mapping, name, record.service_name,
+                              record, req.role_mapping)
+    return {"status": "DEPLOYING", "warnings": warnings}
+
+
+def _run_delete_role_mapping(name: str, service_name: str, record: AppRecord) -> None:
+    """Background task for role-mapping removal: no secret to drop, so this is simpler
+    than _run_delete_license."""
+    registry.update_app(name, {"role_mapping": None})
+    try:
+        constants_list = _constants_from_dict(record.constants or {})
+        spec = _build_spec(name, record.app_schema, record.pg_database,
+                           ResourceTier(record.resource_tier), constants_list,
+                           record.use_caller_rights, record.license_id, None)
+        sf.alter_service_spec(service_name, spec)
+        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+            return
+        _stamp_deploy_success(name, service_name)
+    except Exception:
+        try:
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+        except Exception:
+            pass
+        logger.exception("Role mapping removal failed for %s", name)
+
+
+@app.delete("/apps/{name}/role-mapping", status_code=202)
+def delete_role_mapping(name: str, background_tasks: BackgroundTasks,
+                        roles: set[str] = Depends(caller_roles)):
+    record = _record_for_mutation(name, roles)
+    registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
+    background_tasks.add_task(_run_delete_role_mapping, name, record.service_name, record)
     return {"status": "DEPLOYING"}
 
 

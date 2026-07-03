@@ -21,6 +21,7 @@ _ACTION_PATTERNS = [
     (re.compile(r"^/apps/([^/]+)/constants$"), "update_constants"),
     (re.compile(r"^/apps/([^/]+)/spec$"), "update_spec"),
     (re.compile(r"^/apps/([^/]+)/license$"), "update_license"),
+    (re.compile(r"^/apps/([^/]+)/role-mapping$"), "update_role_mapping"),
     (re.compile(r"^/apps/([^/]+)$"), "delete"),
     (re.compile(r"^/system/compute-pool$"), "resize_compute_pool"),
 ]

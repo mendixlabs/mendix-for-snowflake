@@ -21,6 +21,12 @@ def _row_to_record(row: dict) -> AppRecord:
     constants = row.get("CONSTANTS") or {}
     if isinstance(constants, str):
         constants = json.loads(constants)
+    user_roles = row.get("USER_ROLES") or []
+    if isinstance(user_roles, str):
+        user_roles = json.loads(user_roles)
+    role_mapping = row.get("ROLE_MAPPING") or {}
+    if isinstance(role_mapping, str):
+        role_mapping = json.loads(role_mapping)
     return AppRecord(
         name=row["NAME"],
         service_name=row["SERVICE_NAME"],
@@ -30,6 +36,8 @@ def _row_to_record(row: dict) -> AppRecord:
         use_caller_rights=bool(row.get("USE_CALLER_RIGHTS")),
         constants=constants,
         license_id=row.get("LICENSE_ID"),
+        user_roles=user_roles,
+        role_mapping=role_mapping,
         pad_stage_path=row.get("PAD_STAGE_PATH"),
         endpoint_url=row.get("ENDPOINT_URL"),
         last_deploy_status=row.get("LAST_DEPLOY_STATUS"),
@@ -84,6 +92,7 @@ _ALLOWED_UPDATE_COLUMNS = frozenset({
     "constants", "pad_stage_path", "endpoint_url",
     "last_deploy_status", "last_deployed_at",
     "resource_tier", "use_caller_rights", "owner_role", "license_id",
+    "user_roles", "role_mapping",
 })
 
 
@@ -99,6 +108,13 @@ def update_app(name: str, fields: dict[str, Any]) -> None:
         if key == "constants":
             set_clauses.append(f"{key} = PARSE_JSON(%s)")
             values.append(json.dumps(_mask_constants(val)))
+        elif key in ("user_roles", "role_mapping"):
+            if val is None:
+                set_clauses.append(f"{key} = %s")
+                values.append(None)          # DELETE clears to SQL NULL
+            else:
+                set_clauses.append(f"{key} = PARSE_JSON(%s)")
+                values.append(json.dumps(val))
         else:
             set_clauses.append(f"{key} = %s")
             values.append(val)

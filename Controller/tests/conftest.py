@@ -342,6 +342,7 @@ def make_pad_zip(tmp_path):
         filename: str = "pad.zip",
         extra_defaults: dict[str, str] | None = None,
         extra_vars: dict[str, str] | None = None,
+        metadata_json: str | dict | None = None,
     ):
         if defaults_text is None:
             lines = ['"MyModule.MyConst" = "hello"']
@@ -360,6 +361,9 @@ def make_pad_zip(tmp_path):
                 zf.writestr(f"{prefix}etc/constants/defaults.conf", defaults_text)
             if omit != "variables":
                 zf.writestr(f"{prefix}etc/constants/variables.conf", variables_text)
+            if metadata_json is not None:
+                text = metadata_json if isinstance(metadata_json, str) else json.dumps(metadata_json)
+                zf.writestr(f"{prefix}model/metadata.json", text)
         return zpath
 
     return _make

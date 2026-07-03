@@ -153,5 +153,6 @@ SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs 0.11 credi
 - Snowflake Postgres network policy must be updated when SPCS egress IP ranges rotate (current expiry: 2026-09-07)
 - Apps run trial-licensed (6 concurrent users, restarts every 2-4 hours) until a Mendix license is set per app in the Admin UI; license validation is offline
 - Caller's rights tokens expire after 30 minutes; the SnowflakeSSO refresh snippet must be present in the Main Layout
+- End-users can be given a per-app Mendix userrole based on their Snowflake account roles (Admin UI role mapping), but this requires caller's rights and only account roles are detectable, not application roles
 
 See [mendix-spcs-caveats-and-ideas.md](mendix-spcs-caveats-and-ideas.md) for the full list.

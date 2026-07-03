@@ -104,6 +104,15 @@ class ControllerClient:
     def delete_license(self, name: str) -> dict:
         return self._request("DELETE", f"/apps/{name}/license").json()
 
+    def update_role_mapping(self, name: str, role_mapping: dict) -> dict:
+        return self._request(
+            "PUT", f"/apps/{name}/role-mapping",
+            json={"role_mapping": role_mapping},
+        ).json()
+
+    def delete_role_mapping(self, name: str) -> dict:
+        return self._request("DELETE", f"/apps/{name}/role-mapping").json()
+
     def list_activity(self, app: str | None = None, operator: str | None = None,
                       limit: int = 100) -> list[dict]:
         params: dict = {"limit": limit}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import zipfile
+
 import pytest
 
 from app.pad_parser import (
@@ -9,6 +11,7 @@ from app.pad_parser import (
     _parse_variables,
     parse_from_directory,
     parse_from_zip,
+    parse_user_roles_from_zip,
 )
 
 
@@ -109,3 +112,60 @@ class TestParseFromDirectory:
 
     def test_missing_files_returns_empty(self, tmp_path):
         assert parse_from_directory(tmp_path) == []
+
+
+class TestParseUserRolesFromZip:
+    def _zip_with_metadata(self, tmp_path, metadata_text, path="model/metadata.json", filename="pad.zip"):
+        zpath = tmp_path / filename
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr(path, metadata_text)
+        return zpath
+
+    def test_flat_layout(self, tmp_path):
+        metadata = '{"Roles": {"uuid-1": {"Name": "User"}, "uuid-2": {"Name": "Administrator"}}}'
+        zpath = self._zip_with_metadata(tmp_path, metadata)
+        result = parse_user_roles_from_zip(zpath)
+        assert sorted(result) == ["Administrator", "User"]
+
+    def test_nested_single_directory_layout(self, tmp_path):
+        metadata = '{"Roles": {"uuid-1": {"Name": "User"}}}'
+        zpath = self._zip_with_metadata(tmp_path, metadata, path="MyApp/model/metadata.json")
+        result = parse_user_roles_from_zip(zpath)
+        assert result == ["User"]
+
+    def test_missing_roles_key_returns_empty(self, tmp_path):
+        zpath = self._zip_with_metadata(tmp_path, "{}")
+        assert parse_user_roles_from_zip(zpath) == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        zpath = tmp_path / "pad.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("etc/constants/defaults.conf", "")
+        assert parse_user_roles_from_zip(zpath) == []
+
+    def test_malformed_json_returns_empty_without_raising(self, tmp_path):
+        zpath = self._zip_with_metadata(tmp_path, "not json{")
+        assert parse_user_roles_from_zip(zpath) == []
+
+    def test_datamodel_metadata_json_not_matched(self, tmp_path):
+        # Bare endswith("metadata.json") would incorrectly match this path.
+        zpath = self._zip_with_metadata(
+            tmp_path, '{"Roles": {"uuid-1": {"Name": "ShouldNotBeFound"}}}',
+            path="datamodel/metadata.json",
+        )
+        assert parse_user_roles_from_zip(zpath) == []
+
+    def test_quote_in_name_skipped(self, tmp_path):
+        metadata = '{"Roles": {"uuid-1": {"Name": "Bad\\"Role"}, "uuid-2": {"Name": "Good"}}}'
+        zpath = self._zip_with_metadata(tmp_path, metadata)
+        assert parse_user_roles_from_zip(zpath) == ["Good"]
+
+    def test_control_char_in_name_skipped(self, tmp_path):
+        metadata = '{"Roles": {"uuid-1": {"Name": "Bad\\nRole"}, "uuid-2": {"Name": "Good"}}}'
+        zpath = self._zip_with_metadata(tmp_path, metadata)
+        assert parse_user_roles_from_zip(zpath) == ["Good"]
+
+    def test_dedupe_preserves_first_occurrence(self, tmp_path):
+        metadata = '{"Roles": {"uuid-1": {"Name": "User"}, "uuid-2": {"Name": "User"}}}'
+        zpath = self._zip_with_metadata(tmp_path, metadata)
+        assert parse_user_roles_from_zip(zpath) == ["User"]

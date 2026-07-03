@@ -32,6 +32,12 @@ class TestDeriveAction:
     def test_update_license_delete(self):
         assert activity.derive_action("DELETE", "/apps/myapp/license") == ("update_license", "myapp")
 
+    def test_update_role_mapping_put(self):
+        assert activity.derive_action("PUT", "/apps/myapp/role-mapping") == ("update_role_mapping", "myapp")
+
+    def test_update_role_mapping_delete(self):
+        assert activity.derive_action("DELETE", "/apps/myapp/role-mapping") == ("update_role_mapping", "myapp")
+
     def test_delete(self):
         assert activity.derive_action("DELETE", "/apps/myapp") == ("delete", "myapp")
 

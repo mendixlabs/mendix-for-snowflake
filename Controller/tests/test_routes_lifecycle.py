@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import yaml
+
 from app.models import HIDDEN_VALUE
 
 
@@ -91,6 +93,80 @@ class TestTriggerDeploy:
         resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 202  # exception happens in the background task, not the request
         assert fake_registry.get_app("myapp").last_deploy_status == "FAILED"
+
+    def test_deploy_persists_detected_user_roles(self, client, fake_sf, fake_registry, make_record,
+                                                 role_headers, staged_pad, make_pad_zip):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        zpath = make_pad_zip(
+            defaults_text='"Mod.New" = "world"',
+            variables_text='"Mod.New" = ${?MOD_NEW}',
+            metadata_json={"Roles": {
+                "uuid-1": {"Name": "User"},
+                "uuid-2": {"Name": "Administrator"},
+            }},
+        )
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "READY"
+        assert sorted(final.user_roles) == ["Administrator", "User"]
+
+    def test_deploy_without_metadata_json_stores_empty_user_roles(self, client, fake_sf, fake_registry,
+                                                                   make_record, role_headers, staged_pad,
+                                                                   make_pad_zip):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "READY"
+        assert final.user_roles == []
+
+
+class TestRoleMappingSurvivesRestarts:
+    """Regression guard for the six _build_spec call sites (plan section 5a): missing
+    one silently strips MX_ROLE_MAPPING from the spec on the next unrelated restart."""
+
+    def _mx_role_mapping_env(self, fake_sf):
+        alter_call = fake_sf.calls_for("alter_service_spec")[-1]
+        parsed = yaml.safe_load(alter_call[0][1])
+        return parsed["spec"]["containers"][0]["env"].get("MX_ROLE_MAPPING")
+
+    def test_update_constants_keeps_role_mapping(self, client, fake_sf, fake_registry, make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"},
+                             role_mapping={"ROLE_A": "Administrator"})
+        fake_registry.add(record)
+        resp = client.put("/apps/myapp/constants", headers=role_headers("OWNER_ROLE"),
+                          json={"constants": {"Mod.A": "new-value"}})
+        assert resp.status_code == 202
+        assert self._mx_role_mapping_env(fake_sf) is not None
+
+    def test_update_spec_keeps_role_mapping(self, client, fake_sf, fake_registry, make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", resource_tier="medium",
+                             role_mapping={"ROLE_A": "Administrator"})
+        fake_registry.add(record)
+        resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
+                          json={"resource_tier": "large"})
+        assert resp.status_code == 202
+        assert self._mx_role_mapping_env(fake_sf) is not None
+
+    def test_trigger_deploy_constants_changed_keeps_role_mapping(self, client, fake_sf, fake_registry,
+                                                                  make_record, role_headers, staged_pad,
+                                                                  make_pad_zip):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={},
+                             role_mapping={"ROLE_A": "Administrator"})
+        fake_registry.add(record)
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        assert self._mx_role_mapping_env(fake_sf) is not None
 
 
 class TestUpdateConstants:

@@ -6,9 +6,11 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
-from .pad_parser import CONSTANT_NAME_PATTERN
+from .pad_parser import CONSTANT_NAME_PATTERN, USER_ROLE_NAME_MAX
 
 _CONSTANT_NAME_RE = re.compile(CONSTANT_NAME_PATTERN)
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+_ROLE_MAPPING_MAX_ENTRIES = 50
 
 # Sentinel returned in place of constant values everywhere they leave the
 # controller (registry rows, API responses). Submitting it back means "keep the
@@ -94,6 +96,43 @@ class UpdateLicenseRequest(BaseModel):
     license_key: str = Field(..., min_length=1)
 
 
+class UpdateRoleMappingRequest(BaseModel):
+    """Snowflake account role name -> Mendix userrole name. Keys are normalized
+    to uppercase (Snowflake role names are case-insensitive identifiers)."""
+    role_mapping: dict[str, str]
+
+    @field_validator("role_mapping")
+    @classmethod
+    def _check_role_mapping(cls, mapping: dict[str, str]) -> dict[str, str]:
+        if not mapping:
+            raise ValueError("role_mapping must not be empty; use DELETE to clear it")
+        if len(mapping) > _ROLE_MAPPING_MAX_ENTRIES:
+            raise ValueError(f"role_mapping cannot have more than {_ROLE_MAPPING_MAX_ENTRIES} entries")
+
+        result: dict[str, str] = {}
+        for raw_key, raw_val in mapping.items():
+            key = raw_key.strip()
+            val = raw_val.strip()
+            if not key:
+                raise ValueError("role_mapping keys must not be empty")
+            if not val:
+                raise ValueError("role_mapping values must not be empty")
+            if len(key) > 255:
+                raise ValueError(f"role_mapping key {key!r} exceeds 255 characters")
+            if len(val) > USER_ROLE_NAME_MAX:
+                raise ValueError(f"role_mapping value {val!r} exceeds {USER_ROLE_NAME_MAX} characters")
+            if _CONTROL_CHAR_RE.search(key) or _CONTROL_CHAR_RE.search(val):
+                raise ValueError("role_mapping keys/values must not contain control characters")
+            if "'" in val or '"' in val:
+                # Values feed the Java XPath lookup //System.UserRole[Name='...'].
+                raise ValueError(f"role_mapping value {val!r} must not contain quotes")
+            upper_key = key.upper()
+            if upper_key in result:
+                raise ValueError(f"duplicate role_mapping key after uppercasing: {upper_key!r}")
+            result[upper_key] = val
+        return result
+
+
 class AppRecord(BaseModel):
     name: str
     service_name: str
@@ -110,6 +149,8 @@ class AppRecord(BaseModel):
     # never appears on this model or anywhere else that leaves the controller; it
     # lives only in the per-app MX_LICENSE_KEY secret.
     license_id: Optional[str] = None
+    user_roles: list[str] = Field(default_factory=list)       # detected from PAD at deploy
+    role_mapping: dict[str, str] = Field(default_factory=dict)  # operator-set; not a secret, never masked
     pad_stage_path: Optional[str]
     endpoint_url: Optional[str]
     last_deploy_status: Optional[str]

@@ -168,3 +168,30 @@ class TestDeleteLicense:
         fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", license_id="LIC-1"))
         resp = client.delete("/apps/myapp/license", headers=role_headers("PRIV_ROLE"))
         assert resp.status_code == 202
+
+
+def _mx_role_mapping_env(fake_sf):
+    alter_call = fake_sf.calls_for("alter_service_spec")[-1]
+    parsed = yaml.safe_load(alter_call[0][1])
+    return parsed["spec"]["containers"][0]["env"].get("MX_ROLE_MAPPING")
+
+
+class TestRoleMappingSurvivesLicenseRestarts:
+    """Regression guard for the six _build_spec call sites (plan section 5a): the
+    license endpoints must not silently strip MX_ROLE_MAPPING from the spec."""
+
+    def test_update_license_keeps_role_mapping(self, client, fake_sf, fake_registry, make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", role_mapping={"ROLE_A": "Administrator"})
+        fake_registry.add(record)
+        resp = client.put("/apps/myapp/license", headers=role_headers("OWNER_ROLE"),
+                          json={"license_id": "LIC-1", "license_key": "top-secret-key"})
+        assert resp.status_code == 202
+        assert _mx_role_mapping_env(fake_sf) is not None
+
+    def test_delete_license_keeps_role_mapping(self, client, fake_sf, fake_registry, make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", license_id="LIC-1",
+                             role_mapping={"ROLE_A": "Administrator"})
+        fake_registry.add(record)
+        resp = client.delete("/apps/myapp/license", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        assert _mx_role_mapping_env(fake_sf) is not None

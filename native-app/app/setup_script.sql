@@ -43,13 +43,17 @@ CREATE TABLE IF NOT EXISTS app_public.MENDIX_APPS (
     created_at         TIMESTAMP  DEFAULT CURRENT_TIMESTAMP,
     last_deployed_at   TIMESTAMP,
     owner_role         VARCHAR    DEFAULT 'MENDIX_ADMIN_OPERATOR_ROLE',  -- management-plane owner
-    license_id         VARCHAR                       -- Mendix License ID (identifier, not a credential; the key lives only in the MX_LICENSE_KEY secret)
+    license_id         VARCHAR,                      -- Mendix License ID (identifier, not a credential; the key lives only in the MX_LICENSE_KEY secret)
+    user_roles         VARIANT,   -- Mendix userrole names detected from the PAD's model/metadata.json at deploy
+    role_mapping       VARIANT    -- operator-set map: Snowflake account role (UPPER) -> Mendix userrole; not a secret
 );
 -- CREATE IF NOT EXISTS never adds columns to an existing table; upgrades from
 -- versions without app_schema need the explicit ALTER. Rows written before the
 -- column existed stay NULL and are invalid (clean break, no install base).
 ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS app_schema VARCHAR;
 ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS license_id VARCHAR;
+ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS user_roles VARIANT;
+ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS role_mapping VARIANT;
 
 -- The controller used to create this at startup (activity.py::init_table); pre-create
 -- it here so the schema is complete on install.
