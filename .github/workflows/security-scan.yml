@@ -56,7 +56,7 @@ jobs:
       matrix:
         service: [Controller, Admin UI]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           # Matches the python:3.12-slim base of both service images.
@@ -83,7 +83,7 @@ jobs:
           - image: mendix-base
             context: Mendix Base Image
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build image
         # Same platform flag as native-app/scripts/build-and-push.ps1;
         # --provenance only matters for the registry push, not a local scan.
@@ -118,7 +118,7 @@ jobs:
       matrix:
         service: [Controller, Admin UI]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -138,7 +138,7 @@ jobs:
     name: trivy secrets (repo)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Trivy secret scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -169,7 +169,7 @@ jobs:
           - image: mendix-base
             context: Mendix Base Image
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build image
         run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
       - name: Export image filesystem
@@ -191,7 +191,7 @@ jobs:
     name: shellcheck (entrypoint.sh)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Shellcheck entrypoint.sh
         # shellcheck is preinstalled on ubuntu-latest runners.
         run: shellcheck "Mendix Base Image/entrypoint.sh"
