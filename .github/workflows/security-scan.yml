@@ -96,7 +96,7 @@ jobs:
           output: trivy-${{ matrix.image }}.sarif
           exit-code: '0'
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-${{ matrix.image }}.sarif
           category: trivy-${{ matrix.image }}
@@ -127,7 +127,7 @@ jobs:
       - name: Bandit scan (full report, SARIF)
         run: bandit -r "${{ matrix.service }}/app" -f sarif -o bandit.sarif --exit-zero
       - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: bandit.sarif
           category: bandit-${{ matrix.service }}
@@ -150,7 +150,7 @@ jobs:
           exit-code: '1'
       - name: Upload SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-secrets.sarif
           category: trivy-secrets
