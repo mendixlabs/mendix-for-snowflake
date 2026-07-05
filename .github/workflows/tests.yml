@@ -48,7 +48,7 @@ jobs:
             tests: Admin UI/tests
             cov: Admin UI/app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           # Matches the python:3.12-slim base of both service images.
