@@ -54,9 +54,11 @@ def get_caller_token_spec_status(app_name: str) -> SpecStatus:
                 break
         if row is None:
             return SpecStatus(False, None, None, "no pending or approved request found")
-        state = _find(row, "state")
+        # SHOW SPECIFICATIONS names the approval-state column "status" (not "state");
+        # accept either. Sequence lives in "sequence_number".
+        state = _find(row, "status", "state")
         sequence = _find(row, "sequence")
-        return SpecStatus(True, state, sequence, f"state = {state}")
+        return SpecStatus(True, state, sequence, f"status = {state}")
     except Exception as e:  # insufficient privilege, app not found, etc.
         return SpecStatus(False, None, None, f"check failed: {e}")
     finally:
