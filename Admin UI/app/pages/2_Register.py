@@ -123,7 +123,8 @@ if submitted:
             payload["license_id"] = license_id
             payload["license_key"] = license_key
         try:
-            result = client().create_app(payload)
+            with st.spinner("Registering app..."):
+                result = client().create_app(payload)
             st.cache_data.clear()
             st.success(f"Registered. Service `{result.get('service_name')}` is starting.")
             st.page_link("pages/1_Apps.py", label="Go to Apps", icon=":material/arrow_forward:")

@@ -95,7 +95,10 @@ def _log_view() -> None:
         else:
             logs = client().get_logs(selected_key, lines=int(lines))
     except ControllerError as e:
-        st.error(str(e))
+        if e.status_code == 502:
+            st.info("Container is restarting; retrying...")
+        else:
+            st.error(str(e))
         return
 
     with st.container(height=_LOG_HEIGHT, border=True):

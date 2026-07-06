@@ -479,7 +479,12 @@ def get_app(name: str, roles: set[str] = Depends(caller_roles)):
 @app.get("/apps/{name}/logs")
 def get_logs(name: str, lines: int = 200, roles: set[str] = Depends(caller_roles)):
     record = _record_for_read(name, roles)
-    logs = sf.get_service_logs(record.service_name, lines=lines)
+    try:
+        logs = sf.get_service_logs(record.service_name, lines=lines)
+    except Exception as e:
+        # Surface the underlying reason (e.g. the container is mid-restart) instead of
+        # an opaque 500; the Admin UI's auto-refreshing log viewer treats 502 as transient.
+        raise HTTPException(status_code=502, detail=f"Could not read logs for {name}: {e}")
     return {"logs": logs}
 
 
