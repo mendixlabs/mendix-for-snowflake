@@ -52,6 +52,10 @@ description: |
   external access integration at install; the app provisions its own compute pool and
   warehouse and deploys per-app Mendix services.
 
+  ACCOUNTADMIN is not required to install or operate this app - every setup step uses an
+  ordinary grantable Snowflake privilege, and the app's readme documents a scoped installer
+  role covering the full install.
+
   This application is a standard part of the Mendix Platform and therefore our service-level
   agreements (SLAs) apply here as well. For more information refer to the Mendix Support Guide
   (https://docs.mendix.com/support/).

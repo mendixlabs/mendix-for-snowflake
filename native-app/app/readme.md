@@ -21,7 +21,7 @@ controller brings each one up as its own container service.
 
 ## One-time consumer setup (outside the app)
 
-These require ACCOUNTADMIN and cannot be performed by the app. The admin UI's
+These are account-level objects the app cannot create for itself. The admin UI's
 **Setup / Verify** page shows the exact SQL and checks each step:
 
 1. Create the Snowflake-managed Postgres instance and its network policy.
@@ -30,9 +30,66 @@ These require ACCOUNTADMIN and cannot be performed by the app. The admin UI's
 3. Create the Postgres application user and grant `CREATEDB`.
 4. Create the secret with the Postgres credentials, then bind it as `pg_secret`.
 
+## Required Snowflake role
+
+**ACCOUNTADMIN is not required.** Every privilege above, plus installing the app
+itself, is an ordinary grantable Snowflake privilege. Have ACCOUNTADMIN (or
+SECURITYADMIN) run this once to create a scoped installer role, then do the rest
+of the install as that role:
+
+```sql
+-- Run once by ACCOUNTADMIN or SECURITYADMIN.
+CREATE ROLE IF NOT EXISTS MENDIX_APP_INSTALLER
+  COMMENT = 'Least-privilege role to install and configure the Mendix Native App - no ACCOUNTADMIN required';
+
+-- Install the app from the listing
+GRANT CREATE APPLICATION ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER;
+GRANT IMPORT SHARE       ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER;   -- per Snowflake's listing-install docs; confirm on your first install
+
+-- Passed on to the app via GRANT ... TO APPLICATION at install (WITH GRANT OPTION is
+-- what lets this role hand a privilege to the application object)
+GRANT CREATE COMPUTE POOL   ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER WITH GRANT OPTION;
+GRANT CREATE WAREHOUSE      ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER WITH GRANT OPTION;
+GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER WITH GRANT OPTION;  -- granted to PUBLIC by default since BCR-2321 (May 2026); harmless if redundant
+
+-- One-time Postgres backing-store prerequisites (Setup / Verify page, steps 1-4)
+GRANT CREATE POSTGRES INSTANCE           ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER;  -- AWS/Azure only, not GCP
+GRANT CREATE NETWORK POLICY              ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER;
+GRANT CREATE EXTERNAL ACCESS INTEGRATION ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER;
+GRANT CREATE COMPUTE POOL                ON ACCOUNT TO ROLE MENDIX_APP_INSTALLER;  -- to run the one-off PG_SETUP_JOB before the app exists
+
+-- Schema-level, in whatever schema holds the prerequisite objects (secret, network
+-- rules, the throwaway PG_SETUP_JOB service)
+GRANT USAGE  ON DATABASE <db>          TO ROLE MENDIX_APP_INSTALLER;
+GRANT USAGE  ON SCHEMA   <db>.<schema> TO ROLE MENDIX_APP_INSTALLER;
+GRANT CREATE SECRET       ON SCHEMA <db>.<schema> TO ROLE MENDIX_APP_INSTALLER;
+GRANT CREATE SERVICE      ON SCHEMA <db>.<schema> TO ROLE MENDIX_APP_INSTALLER;
+GRANT CREATE NETWORK RULE ON SCHEMA <db>.<schema> TO ROLE MENDIX_APP_INSTALLER;
+
+GRANT ROLE MENDIX_APP_INSTALLER TO ROLE <your operator/admin role>;
+```
+
+No `MANAGE APPLICATION SPECIFICATIONS` grant is needed: the role that runs
+`CREATE APPLICATION` owns the app and can approve the `caller_token_spec` request
+(see "After install" below) without an extra grant.
+
+This role list is built from Snowflake's documented privilege model, not yet
+validated end to end against a live install with this exact role - if a step
+fails with an authorization error, that's the one to double-check first.
+
 ## After install
 
-Grant the admin role to your operators:
+Approve the app's request for extended caller-token validity (required - without
+it, `executeAsCaller` sessions fall back to the 120s default and operator-role
+resolution fails with `OAUTH_ACCESS_TOKEN_EXPIRED`). Do this in Snowsight (app
+security details, permissions tab), in the admin UI's **Setup / Verify** page, or:
+
+```sql
+SHOW SPECIFICATIONS IN APPLICATION <app_name>;
+ALTER APPLICATION <app_name> APPROVE SPECIFICATION caller_token_spec SEQUENCE_NUMBER = <n>;
+```
+
+Then grant the admin role to your operators:
 
 ```sql
 GRANT APPLICATION ROLE <app_name>.app_admin TO ROLE <operators>;
