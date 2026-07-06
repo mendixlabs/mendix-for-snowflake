@@ -352,6 +352,12 @@ capabilities:
     EXECUTE IMMEDIATE 'GRANT SERVICE ROLE ' || db_schema ||
         '.MENDIX_DEPLOY_CONTROLLER!ALL_ENDPOINTS_USAGE TO APPLICATION ROLE app_admin';
 
+    -- OWNERSHIP on a service created here belongs to the application itself, not
+    -- app_admin, so SYSTEM$GET_SERVICE_LOGS (the /system/logs endpoint) 403s for
+    -- every caller without this explicit grant.
+    EXECUTE IMMEDIATE 'GRANT MONITOR ON SERVICE ' || db_schema ||
+        '.MENDIX_DEPLOY_CONTROLLER TO APPLICATION ROLE app_admin';
+
     RETURN 'controller started';
 END;
 $$;
@@ -430,6 +436,9 @@ capabilities:
 
     EXECUTE IMMEDIATE 'GRANT SERVICE ROLE ' || db_schema ||
         '.MENDIX_DEPLOY_ADMIN_UI!ALL_ENDPOINTS_USAGE TO APPLICATION ROLE app_admin';
+
+    EXECUTE IMMEDIATE 'GRANT MONITOR ON SERVICE ' || db_schema ||
+        '.MENDIX_DEPLOY_ADMIN_UI TO APPLICATION ROLE app_admin';
 
     RETURN 'admin_ui started';
 END;

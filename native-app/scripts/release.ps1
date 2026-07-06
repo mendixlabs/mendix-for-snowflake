@@ -74,7 +74,7 @@ if (-not $SkipBuild) {
 # version name from .build/app/manifest.yml; --patch is omitted for a brand-new
 # version (-> patch 0) and only passed when explicitly tracking an existing patch.
 Write-Host "[2/4] Creating version $version (patch target $Patch)..." -ForegroundColor Cyan
-$createArgs = @("app", "version", "create", $version, "--connection", $conn)
+$createArgs = @("app", "version", "create", $version, "--connection", $conn, "--force")
 if ($SkipGitCheck) { $createArgs += "--skip-git-check" }
 Push-Location $buildDir
 try {

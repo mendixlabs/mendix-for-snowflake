@@ -240,6 +240,13 @@ class TestServiceLifecycleSql:
         assert "EXTERNAL_ACCESS_INTEGRATIONS = (TEST_EAI)" in sql
         assert "QUERY_WAREHOUSE = TEST_WH" in sql
 
+    def test_create_service_grants_monitor_to_app_admin(self, fake_execute_sql):
+        # Without this, get_service_logs() 403s for every caller: a freshly
+        # created service is owned by the application, not app_admin.
+        sf.create_service("MYAPP_SERVICE", "spec: yaml", "TEST_POOL", "TEST_EAI", "TEST_WH")
+        sql, params = fake_execute_sql.calls[1]
+        assert sql == "GRANT MONITOR ON SERVICE TESTDB.PUBLIC.MYAPP_SERVICE TO APPLICATION ROLE app_admin"
+
     def test_alter_service_spec_sql(self, fake_execute_sql):
         sf.alter_service_spec("MYAPP_SERVICE", "spec: yaml")
         sql, params = fake_execute_sql.calls[0]

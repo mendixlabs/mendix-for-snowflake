@@ -140,6 +140,11 @@ def create_service(name: str, spec: str, compute_pool: str, eai: str, warehouse:
             EXTERNAL_ACCESS_INTEGRATIONS = ({eai})
             QUERY_WAREHOUSE = {warehouse}
     """))
+    # Without this, get_service_logs() 403s for every caller (including
+    # ACCOUNTADMIN holding app_admin): a freshly created service is owned by
+    # the application itself, and OWNERSHIP does not cascade MONITOR to
+    # application roles that merely have CREATE SERVICE on the schema.
+    execute_sql(f"GRANT MONITOR ON SERVICE {_DB_SCHEMA}.{name} TO APPLICATION ROLE {APP_ADMIN_ROLE}")
 
 
 def alter_service_spec(name: str, spec: str) -> None:
