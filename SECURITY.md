@@ -4,8 +4,7 @@
 
 Report vulnerabilities through Siemens ProductCERT's vulnerability handling and disclosure
 process: https://www.siemens.com/global/en/products/services/cert/vulnerability-process.html.
-Alternatively, email security@mendix.com. Mendix also operates a responsible disclosure
-program on HackerOne: https://hackerone.com/siemens.
+Alternatively, email security@mendix.com.
 
 To reach the maintainer of this repository directly and fastest, open a GitHub issue:
 https://github.com/mendixlabs/mendix-for-snowflake/issues. For a sensitive
