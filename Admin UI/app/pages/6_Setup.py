@@ -19,14 +19,17 @@ import streamlit as st
 
 from branding import apply_branding
 from setup_checks import run_checks
+from spec_approval import approve_caller_token_spec, get_caller_token_spec_status
 
 st.set_page_config(page_title="Setup / Verify", layout="wide")
 apply_branding()
 st.title("Setup / Verify")
 st.caption(
-    "One-time, ACCOUNTADMIN-only prerequisites the app cannot create for itself, "
-    "and a check that they exist. Run the SQL outside the app (the app installs "
-    "the controller and admin UI; these account-level objects do not)."
+    "One-time prerequisites the app cannot create for itself, and a check that "
+    "they exist. Run the SQL outside the app (the app installs the controller and "
+    "admin UI; these account-level objects do not). ACCOUNTADMIN works, but isn't "
+    "required - see the app readme's 'Required Snowflake role' section for a "
+    "scoped-down installer role covering every step below."
 )
 
 # --- Parameters --------------------------------------------------------------
@@ -56,7 +59,7 @@ st.divider()
 
 # --- Step 1: network + Postgres instance -------------------------------------
 st.subheader("1 - Postgres instance + network policy")
-st.caption("ACCOUNTADMIN. Credentials in the CREATE output are shown only once - save them.")
+st.caption("Credentials in the CREATE output are shown only once - save them.")
 st.code(
     f"""-- Current SPCS egress IP ranges (feed the CIDRs into the ingress rule below).
 SELECT SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES();
@@ -80,7 +83,7 @@ CREATE POSTGRES INSTANCE {instance}
 
 # --- Step 2: egress EAI ------------------------------------------------------
 st.subheader("2 - Egress EAI (SPCS -> Postgres)")
-st.caption("ACCOUNTADMIN. Bound into the app as the pg_eai reference at install.")
+st.caption("Bound into the app as the pg_eai reference at install.")
 st.code(
     f"""CREATE NETWORK RULE {egress_rule}
   TYPE = HOST_PORT
@@ -123,7 +126,7 @@ DROP SERVICE {secret_db}.{secret_schema}.PG_SETUP_JOB;""",
 # --- Step 4: PG credential secret --------------------------------------------
 st.subheader("4 - PG credential secret")
 st.caption(
-    "ACCOUNTADMIN. A single GENERIC_STRING secret holding host:port + password as "
+    "A single GENERIC_STRING secret holding host:port + password as "
     "JSON; the controller reads it at /secrets/pg/secret_string. Bound as pg_secret."
 )
 st.code(
@@ -140,13 +143,7 @@ st.caption(
     "register_reference, which start the controller and admin UI."
 )
 st.code(
-    f"""-- Caller-token validity for executeAsCaller services. An application object
--- cannot set this on its own services (needs MANAGE SERVICE CALLER ACCESS), so
--- set it once at the account level; it cascades to the app's services. Without
--- it, the admin UI's operator-role resolution fails with OAUTH_ACCESS_TOKEN_EXPIRED.
-ALTER ACCOUNT SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
-
-GRANT CREATE COMPUTE POOL   ON ACCOUNT TO APPLICATION {app_name};
+    f"""GRANT CREATE COMPUTE POOL   ON ACCOUNT TO APPLICATION {app_name};
 GRANT CREATE WAREHOUSE      ON ACCOUNT TO APPLICATION {app_name};
 GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO APPLICATION {app_name};
 GRANT APPLICATION ROLE {app_name}.app_admin TO ROLE ACCOUNTADMIN;
@@ -168,6 +165,39 @@ st.info(
     f"`{ingress_rule}` with `SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES()` before they lapse."
 )
 
+# --- Step 5b: approve the app's caller-token validity request ---------------
+st.subheader("5b - Approve extended caller token validity")
+st.caption(
+    "Required. The app requests 30-minute caller-token validity for its own "
+    "services via an app specification. Approve it once, or the services fall "
+    "back to the 120s default and operator-role resolution fails with "
+    "OAUTH_ACCESS_TOKEN_EXPIRED."
+)
+status = get_caller_token_spec_status(app_name)
+if status.state and "approv" in status.state.lower():
+    st.success("Extended caller token validity: approved")
+elif status.exists:
+    st.warning(f"Extended caller token validity: pending ({status.detail})")
+    if st.button("Approve extended caller token validity", type="primary"):
+        ok, message = approve_caller_token_spec(app_name, status.sequence_number)
+        (st.success if ok else st.error)(message)
+else:
+    st.info(
+        "No pending request yet - upgrade the app to the patch that requests "
+        "it, then re-check."
+    )
+with st.expander("Approve manually"):
+    st.caption(
+        "Use this if the operator lacks MANAGE APPLICATION SPECIFICATIONS or "
+        "self-approval is blocked. Also available in Snowsight: app security "
+        "details, permissions tab."
+    )
+    st.code(
+        f"""SHOW SPECIFICATIONS IN APPLICATION {app_name};
+ALTER APPLICATION {app_name} APPROVE SPECIFICATION caller_token_spec SEQUENCE_NUMBER = <n>;""",
+        language="sql",
+    )
+
 # --- Step 6: grant the app access to the data each Mendix app queries --------
 st.subheader("6 - Grant the app read access to the Snowflake data your Mendix apps query")
 st.caption(
@@ -182,8 +212,8 @@ st.code(
     f"""-- Replace the data DB / schema / warehouse with the ones your Mendix app queries.
 -- Grant these BEFORE the app first connects. A grant added while the app is already
 -- running is not picked up until its Snowflake session refreshes with a newly minted
--- caller token, which can take up to SERVICE_CALLER_TOKEN_VALIDITY_SECS (~30 min, set
--- above) to rotate. Adding access to a live app is therefore not immediate.
+-- caller token, which can take up to the approved caller_token_spec app setting
+-- (~30 minutes) to rotate. Adding access to a live app is therefore not immediate.
 GRANT USAGE  ON DATABASE <data_db>                           TO APPLICATION {app_name};
 GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO APPLICATION {app_name};
 GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO APPLICATION {app_name};
@@ -199,7 +229,7 @@ st.warning(
     "the app must read. Run these grants before the app first connects. A privilege "
     "added after the app has opened its Snowflake session is not picked up live: the "
     "app must reconnect with a freshly minted caller token, which can take up to "
-    "SERVICE_CALLER_TOKEN_VALIDITY_SECS (~30 minutes, set above) to rotate. Plan for "
+    "the approved caller_token_spec app setting (~30 minutes) to rotate. Plan for "
     "roughly a 30-minute lag when adding data access to an already-running app."
 )
 

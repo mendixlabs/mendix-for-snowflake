@@ -52,12 +52,10 @@ class TestCreateAppHappyPath:
         assert record.last_deploy_status == "NOT_DEPLOYED"
         assert record.app_schema == "MXAPP_MYAPP"
 
-    def test_use_caller_rights_sets_caller_token_validity(self, client, fake_sf, fake_registry, role_headers):
+    def test_use_caller_rights_sets_execute_as_caller(self, client, fake_sf, fake_registry, role_headers):
         resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),
                            json=_create_payload(name="callerapp", use_caller_rights=True))
         assert resp.status_code == 201
-        calls = fake_sf.calls_for("set_caller_token_validity")
-        assert calls == [(("CALLERAPP_SERVICE", 1800), {})]
         spec = fake_sf.calls_for("create_service")[0][0][1]
         parsed = yaml.safe_load(spec)
         assert parsed["capabilities"]["securityContext"]["executeAsCaller"] is True

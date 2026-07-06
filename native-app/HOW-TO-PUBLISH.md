@@ -95,6 +95,10 @@ SHOW VERSIONS IN APPLICATION PACKAGE MENDIX_SPCS_PKG;
 
 This is the validation step: install the app **from the frozen version** (not from the live dev stage). Mechanically identical to a consumer install from the listing.
 
+Run as ACCOUNTADMIN below for dry-run convenience. A real consumer does not need
+ACCOUNTADMIN for any of this - see `native-app/app/readme.md` ("Required Snowflake
+role") for the documented minimal installer role.
+
 ### Install
 
 ```sql
@@ -111,8 +115,12 @@ GRANT CREATE WAREHOUSE      ON ACCOUNT TO APPLICATION MENDIX_SPCS_APP;
 GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO APPLICATION MENDIX_SPCS_APP;
 GRANT APPLICATION ROLE MENDIX_SPCS_APP.app_admin TO ROLE ACCOUNTADMIN;
 
--- Required for executeAsCaller services (cannot be set by the app itself)
-ALTER ACCOUNT SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 1800;
+-- Required for executeAsCaller services (cannot be set by the app itself).
+-- The app requests this via an app specification; approve the pending
+-- request (also doable in Snowsight: app security details -> permissions
+-- tab, or via the admin UI Setup page's approve button).
+SHOW SPECIFICATIONS IN APPLICATION MENDIX_SPCS_APP;
+ALTER APPLICATION MENDIX_SPCS_APP APPROVE SPECIFICATION caller_token_spec SEQUENCE_NUMBER = <n>;
 
 CALL MENDIX_SPCS_APP.app_public.grant_callback(
   ARRAY_CONSTRUCT('CREATE COMPUTE POOL','CREATE WAREHOUSE','BIND SERVICE ENDPOINT'));

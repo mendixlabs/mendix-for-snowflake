@@ -241,17 +241,6 @@ def get_service_endpoint(name: str) -> str | None:
     return None
 
 
-def set_caller_token_validity(name: str, secs: int = 1800) -> None:
-    try:
-        execute_sql(
-            f"ALTER SERVICE {_DB_SCHEMA}.{name} "
-            f"SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = {secs}"
-        )
-    except Exception as e:
-        # Schema-level fallback intentionally omitted: it would affect all services in the schema.
-        logger.warning("Could not set SERVICE_CALLER_TOKEN_VALIDITY_SECS on %s: %s", name, e)
-
-
 def get_service_logs(name: str, container: str = "mendix-app", lines: int = 100) -> str:
     # Bind the arguments rather than interpolate: callers pass allowlisted service +
     # container names today, but binding keeps this safe regardless of the source.

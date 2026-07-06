@@ -111,6 +111,23 @@ INSERT INTO app_public.internal_config (config_key, config_value)
     );
 
 -- -----------------------------------------------------------------------------
+-- 3b. Request extended caller-token validity for the app's own services.
+--     executeAsCaller sessions need this above the 120s default or operator-role
+--     resolution and data-grant pickup fail with OAUTH_ACCESS_TOKEN_EXPIRED.
+--     The app cannot ALTER SERVICE this itself (needs MANAGE SERVICE CALLER
+--     ACCESS). This app-scoped request replaces the old account-level workaround;
+--     the consumer approves it once (Snowsight permissions tab, or ALTER
+--     APPLICATION ... APPROVE SPECIFICATION) and it cascades to every service the
+--     app owns, present and future. Requires manifest_version: 2.
+-- -----------------------------------------------------------------------------
+ALTER APPLICATION SET SPECIFICATION caller_token_spec
+  TYPE = SETTING
+  LABEL = 'Extended caller token validity'
+  DESCRIPTION = 'Keeps executeAsCaller sessions valid for 30 minutes so operator-role resolution and data-grant pickup do not fail with OAUTH_ACCESS_TOKEN_EXPIRED.'
+  SETTING = SERVICE_CALLER_TOKEN_VALIDITY_SECS
+  VALUE = 1800;
+
+-- -----------------------------------------------------------------------------
 -- 4. grant_callback - REQUIRED for apps with containers.
 --    Invoked by Snowflake after the consumer grants the manifest privileges.
 --    Creates the compute pool + warehouse (named off the app database so two
@@ -343,10 +360,10 @@ capabilities:
 
     -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is NOT set here: setting it on a service
     -- requires MANAGE SERVICE CALLER ACCESS on the account, which no application
-    -- object can hold. The consumer's ACCOUNTADMIN sets it once at the account
-    -- level (Setup/Verify page, step 5); the value cascades to this service.
-    -- executeAsCaller caller sessions need that non-default validity to avoid
-    -- OAUTH_ACCESS_TOKEN_EXPIRED.
+    -- object can hold. It is instead requested via the caller_token_spec app
+    -- specification (section 3b) and approved by the consumer; the approved
+    -- value cascades to this service. executeAsCaller caller sessions need that
+    -- non-default validity to avoid OAUTH_ACCESS_TOKEN_EXPIRED.
 
     -- Power-user / CLI access to the controller API.
     EXECUTE IMMEDIATE 'GRANT SERVICE ROLE ' || db_schema ||
@@ -431,8 +448,9 @@ capabilities:
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
 
-    -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is set account-level by the consumer
-    -- (see start_controller for why); it cascades to this service.
+    -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is requested via the caller_token_spec
+    -- app specification and approved by the consumer (see start_controller for
+    -- why); the approved value cascades to this service.
 
     EXECUTE IMMEDIATE 'GRANT SERVICE ROLE ' || db_schema ||
         '.MENDIX_DEPLOY_ADMIN_UI!ALL_ENDPOINTS_USAGE TO APPLICATION ROLE app_admin';

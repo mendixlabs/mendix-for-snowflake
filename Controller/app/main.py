@@ -431,9 +431,6 @@ def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
 
     sf.create_service(service_name, spec, COMPUTE_POOL, PG_EAI, QUERY_WAREHOUSE)
 
-    if req.use_caller_rights:
-        sf.set_caller_token_validity(service_name, 1800)
-
     # Data-plane access control: gate the public endpoint behind a per-app
     # APPLICATION role. End-user membership of app_<name>_user is managed
     # in the IdP via SCIM (GRANT APPLICATION ROLE ... TO USER). Also grant app_admin
@@ -728,14 +725,12 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
 
 
 def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
-                     new_caller: bool, caller_flipping_on: bool) -> None:
+                     new_caller: bool) -> None:
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, new_tier, constants_list, new_caller,
                            record.license_id, record.role_mapping, record.pad_stage_path)
         sf.alter_service_spec(record.service_name, spec)
-        if caller_flipping_on:
-            sf.set_caller_token_validity(record.service_name, 1800)
         if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
             return
@@ -764,10 +759,9 @@ def update_spec(name: str, req: UpdateSpecRequest, background_tasks: BackgroundT
 
     new_tier = req.resource_tier if req.resource_tier is not None else ResourceTier(record.resource_tier)
     new_caller = req.use_caller_rights if req.use_caller_rights is not None else bool(record.use_caller_rights)
-    caller_flipping_on = (not record.use_caller_rights) and new_caller
 
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
-    background_tasks.add_task(_run_update_spec, name, record, new_tier, new_caller, caller_flipping_on)
+    background_tasks.add_task(_run_update_spec, name, record, new_tier, new_caller)
     return {"status": "DEPLOYING"}
 
 

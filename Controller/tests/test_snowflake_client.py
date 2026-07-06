@@ -283,18 +283,6 @@ class TestServiceLifecycleSql:
         sql, params = fake_execute_sql.calls[0]
         assert sql == "DROP APPLICATION ROLE IF EXISTS app_myapp_user"
 
-    def test_set_caller_token_validity_sql(self, fake_execute_sql):
-        sf.set_caller_token_validity("MYAPP_SERVICE", 900)
-        sql, params = fake_execute_sql.calls[0]
-        assert sql == "ALTER SERVICE TESTDB.PUBLIC.MYAPP_SERVICE SET SERVICE_CALLER_TOKEN_VALIDITY_SECS = 900"
-
-    def test_set_caller_token_validity_swallows_exceptions(self, monkeypatch):
-        def raiser(sql, params=()):
-            raise RuntimeError("not supported")
-
-        monkeypatch.setattr(sf, "execute_sql", raiser)
-        sf.set_caller_token_validity("MYAPP_SERVICE")  # must not raise
-
     def test_put_file_sql(self, fake_execute_sql):
         sf.put_file("/tmp/x.zip", "@TESTDB.PUBLIC.MENDIX_DEPLOY_STAGE/apps/myapp/")
         sql, params = fake_execute_sql.calls[0]

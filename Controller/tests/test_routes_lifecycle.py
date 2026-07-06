@@ -259,19 +259,13 @@ class TestUpdateSpec:
         assert final.resource_tier == "large"
         assert final.last_deploy_status == "READY"
 
-    def test_caller_rights_off_to_on_sets_validity(self, client, fake_sf, fake_registry, make_record, role_headers):
+    def test_caller_rights_off_to_on_updates_registry(self, client, fake_sf, fake_registry, make_record, role_headers):
         fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", use_caller_rights=False))
         resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
                           json={"use_caller_rights": True})
         assert resp.status_code == 202
-        assert fake_sf.calls_for("set_caller_token_validity")
-
-    def test_caller_rights_already_on_not_called(self, client, fake_sf, fake_registry, make_record, role_headers):
-        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", use_caller_rights=True))
-        resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
-                          json={"use_caller_rights": True})
-        assert resp.status_code == 202
-        assert fake_sf.calls_for("set_caller_token_validity") == []
+        final = fake_registry.get_app("myapp")
+        assert final.use_caller_rights is True
 
 
 class TestSuspendResume:

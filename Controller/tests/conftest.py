@@ -73,7 +73,6 @@ _PATCHED_SF_FUNCS = [
     "show_service_status",
     "show_all_service_statuses",
     "get_service_endpoint",
-    "set_caller_token_validity",
     "get_service_logs",
     "get_compute_pool",
     "alter_compute_pool",
@@ -169,9 +168,6 @@ class FakeSF:
     def get_service_endpoint(self, name):
         self._record("get_service_endpoint", (name,), {})
         return self.endpoints.get(name)
-
-    def set_caller_token_validity(self, name, secs=1800):
-        self._record("set_caller_token_validity", (name, secs), {})
 
     def get_service_logs(self, name, container="mendix-app", lines=100):
         self._record("get_service_logs", (name,), {"container": container, "lines": lines})

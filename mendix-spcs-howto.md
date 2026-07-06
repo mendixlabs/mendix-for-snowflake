@@ -37,8 +37,9 @@ The compound token (`<service-token>.<caller-token>`) authenticates via OAuth ov
 Snowflake network. No EAI needed for this path. A query succeeds only when **both** the end user
 and the application object hold the privilege (restricted caller's rights) — the data grants are
 covered by [native-app/app/readme.md](native-app/app/readme.md) and Setup / Verify step 6.
-Caller tokens expire after `SERVICE_CALLER_TOKEN_VALIDITY_SECS` (set account-wide at install,
-typically 1800), so grants added to a live app can take up to ~30 minutes to be picked up.
+Caller tokens expire after `SERVICE_CALLER_TOKEN_VALIDITY_SECS` (requested by the app and
+approved by the consumer for the app's services (30 minutes)), so grants added to a live app
+can take up to ~30 minutes to be picked up.
 
 ### JDBC connection URL
 
