@@ -8,7 +8,7 @@ Alternatively, email security@mendix.com. Mendix also operates a responsible dis
 program on HackerOne: https://hackerone.com/siemens.
 
 To reach the maintainer of this repository directly and fastest, open a GitHub issue:
-https://github.com/Rvthof/mendix-snowflake-native-deployment/issues. For a sensitive
+https://github.com/mendixlabs/mendix-for-snowflake/issues. For a sensitive
 finding you would rather not disclose in the open, use GitHub's private vulnerability
 reporting on the repository's Security tab instead, which reaches the maintainer just as
 quickly without a public issue.

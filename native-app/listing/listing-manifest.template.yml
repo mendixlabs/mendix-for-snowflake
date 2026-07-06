@@ -64,7 +64,7 @@ categories:
 - "CONNECTORS"
 
 resources:
-  documentation: "https://github.com/Rvthof/mendix-snowflake-native-deployment"
+  documentation: "https://github.com/mendixlabs/mendix-for-snowflake"
 
 # Shared Mendix provider profile (global name GZTDZHHIDF). Inherits the company
 # name, description, logo, supportUrl, privacyUrl, and the support/technical
