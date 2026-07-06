@@ -125,7 +125,7 @@ ALTER APPLICATION SET SPECIFICATION caller_token_spec
   LABEL = 'Extended caller token validity'
   DESCRIPTION = 'Keeps executeAsCaller sessions valid for 30 minutes so operator-role resolution and data-grant pickup do not fail with OAUTH_ACCESS_TOKEN_EXPIRED.'
   SETTING = SERVICE_CALLER_TOKEN_VALIDITY_SECS
-  VALUE = 1800;
+  VALUE = '1800';
 
 -- -----------------------------------------------------------------------------
 -- 4. grant_callback - REQUIRED for apps with containers.
