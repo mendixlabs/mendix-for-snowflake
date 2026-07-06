@@ -86,6 +86,15 @@ class TestBuildSpec:
             f"{main.DEPLOY_STAGE_MOUNT}/apps/myapp/current.zip"
         )
 
+    def test_pad_relative_path_override_used_verbatim(self):
+        # The container's entrypoint has no filename fallback of its own, so
+        # whatever _resolve_staged_pad actually found must be exactly what
+        # PAD_STAGE_PATH points to - not the current.zip placeholder.
+        spec = self._spec(pad_relative_path="apps/myapp/MyReleasePad_20260706.zip")
+        assert spec["spec"]["containers"][0]["env"]["PAD_STAGE_PATH"] == (
+            f"{main.DEPLOY_STAGE_MOUNT}/apps/myapp/MyReleasePad_20260706.zip"
+        )
+
     def test_pg_host_from_env_fallback(self):
         spec = self._spec()
         assert spec["spec"]["containers"][0]["env"]["RUNTIME_PARAMS_DATABASEHOST"] == "pg.test.local:5432"

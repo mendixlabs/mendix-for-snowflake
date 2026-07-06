@@ -53,21 +53,46 @@ class TestTriggerDeploy:
         assert final.endpoint_url == "https://live.example.com"
         assert final.constants["Mod.New"] == "world"
 
-    def test_unchanged_constants_uses_suspend_resume_path(self, client, fake_sf, fake_registry, make_record,
-                                                           role_headers, staged_pad, make_pad_zip):
+    def test_unchanged_constants_still_rebuilds_spec(self, client, fake_sf, fake_registry, make_record,
+                                                      role_headers, staged_pad, make_pad_zip):
+        # Regression guard: PAD_STAGE_PATH must be refreshed even when constants
+        # are unchanged, since the staged filename can still differ from the
+        # previous deploy's. alter_service_spec (not suspend/resume) is the only
+        # path that can update it, so it must always run.
         record = make_record(name="myapp", owner_role="OWNER_ROLE",
                              constants={"Mod.Same": "same-value"})
         fake_registry.add(record)
-        fake_sf.status_queue[record.service_name] = ["SUSPENDED", "RUNNING"]
         zpath = make_pad_zip(defaults_text='"Mod.Same" = "same-value"',
                              variables_text='"Mod.Same" = ${?MOD_SAME}')
         staged_pad("myapp", src_zip=zpath)
         resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 202
-        assert fake_sf.calls_for("suspend_service")
-        assert fake_sf.calls_for("resume_service")
-        assert fake_sf.calls_for("alter_service_spec") == []
+        assert fake_sf.calls_for("suspend_service") == []
+        assert fake_sf.calls_for("resume_service") == []
+        assert fake_sf.calls_for("alter_service_spec")
         assert fake_registry.get_app("myapp").last_deploy_status == "READY"
+        assert fake_registry.get_app("myapp").pad_stage_path == "apps/myapp/current.zip"
+
+    def test_redeploy_with_noncanonical_filename_updates_pad_stage_path(
+        self, client, fake_sf, fake_registry, make_record, role_headers, staged_pad, make_pad_zip
+    ):
+        # The whole point of _resolve_staged_pad's newest-.zip fallback: a consumer
+        # can `snow stage copy` their PAD under its own name without renaming it to
+        # current.zip first. PAD_STAGE_PATH in the rebuilt spec must point at that
+        # exact file, or the container's entrypoint (no fallback of its own) 404s.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath, filename="MyReleasePad_20260706.zip")
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        alter_call = fake_sf.calls_for("alter_service_spec")[-1]
+        spec = yaml.safe_load(alter_call[0][1])
+        assert spec["spec"]["containers"][0]["env"]["PAD_STAGE_PATH"].endswith(
+            "apps/myapp/MyReleasePad_20260706.zip"
+        )
+        assert fake_registry.get_app("myapp").pad_stage_path == "apps/myapp/MyReleasePad_20260706.zip"
 
     def test_poll_failure_marks_failed(self, client, fake_sf, fake_registry, make_record,
                                        role_headers, staged_pad, make_pad_zip, monkeypatch):

@@ -177,11 +177,16 @@ def _build_spec(
     use_caller_rights: bool,
     license_id: str | None = None,
     role_mapping: dict[str, str] | None = None,
+    pad_relative_path: str | None = None,
 ) -> str:
     res = RESOURCE_TIERS[resource_tier]
     pg_host_port = _pg_host()
     image_path = MENDIX_BASE_IMAGE
-    pad_path = f"{DEPLOY_STAGE_MOUNT}/apps/{app_name}/current.zip"
+    # Falls back to the placeholder name at first registration, before any PAD has
+    # been staged/resolved. Every later rebuild must pass the actual resolved path -
+    # the container's entrypoint has no fallback logic of its own, so PAD_STAGE_PATH
+    # must exactly match whatever filename was really staged (see _resolve_staged_pad).
+    pad_path = f"{DEPLOY_STAGE_MOUNT}/{pad_relative_path or f'apps/{app_name}/current.zip'}"
 
     secret_entries = [
         {
@@ -593,15 +598,17 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
             # leave the registry and the per-app secrets out of step (see the same
             # fix in _run_update_constants).
             registry.update_app(name, {"constants": new_constants})
-            spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                               _constants_from_dict(new_constants), record.use_caller_rights, record.license_id,
-                               record.role_mapping)
-            sf.alter_service_spec(record.service_name, spec)
-        else:
-            sf.suspend_service(record.service_name)
-            if not _poll_status(record.service_name, "SUSPENDED", timeout_secs=120):
-                raise RuntimeError(f"Service {record.service_name} did not suspend within 120s")
-            sf.resume_service(record.service_name)
+
+        # Always rebuild the spec, even when constants didn't change: PAD_STAGE_PATH
+        # must track whatever file was actually resolved for this deploy (it may
+        # differ from the previous deploy's filename even with identical constants).
+        # Normalized to forward slashes: the path lands in a Linux container's env
+        # var regardless of the OS the Controller (or its test suite) runs on.
+        pad_relative_path = os.path.relpath(pad_path, DEPLOY_STAGE_MOUNT).replace(os.sep, "/")
+        spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
+                           _constants_from_dict(new_constants), record.use_caller_rights, record.license_id,
+                           record.role_mapping, pad_relative_path)
+        sf.alter_service_spec(record.service_name, spec)
 
         if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -609,7 +616,7 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
 
         _stamp_deploy_success(name, record.service_name, {
             "constants": new_constants,
-            "pad_stage_path": f"apps/{name}/current.zip",
+            "pad_stage_path": pad_relative_path,
             "user_roles": user_roles,
         })
     except Exception:
@@ -669,7 +676,8 @@ def _run_update_constants(name: str, service_name: str, merged: dict,
     registry.update_app(name, {"constants": merged})
     try:
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                           constants, record.use_caller_rights, record.license_id, record.role_mapping)
+                           constants, record.use_caller_rights, record.license_id, record.role_mapping,
+                           record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -719,7 +727,7 @@ def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, new_tier, constants_list, new_caller,
-                           record.license_id, record.role_mapping)
+                           record.license_id, record.role_mapping, record.pad_stage_path)
         sf.alter_service_spec(record.service_name, spec)
         if caller_flipping_on:
             sf.set_caller_token_validity(record.service_name, 1800)
@@ -766,7 +774,8 @@ def _run_update_license(name: str, service_name: str, record: AppRecord, license
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                           constants_list, record.use_caller_rights, license_id, record.role_mapping)
+                           constants_list, record.use_caller_rights, license_id, record.role_mapping,
+                           record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -799,7 +808,8 @@ def _run_delete_license(name: str, service_name: str, record: AppRecord) -> None
     try:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
-                           constants_list, record.use_caller_rights, None, record.role_mapping)
+                           constants_list, record.use_caller_rights, None, record.role_mapping,
+                           record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -832,7 +842,8 @@ def _run_update_role_mapping(name: str, service_name: str, record: AppRecord,
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database,
                            ResourceTier(record.resource_tier), constants_list,
-                           record.use_caller_rights, record.license_id, role_mapping)
+                           record.use_caller_rights, record.license_id, role_mapping,
+                           record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
@@ -879,7 +890,8 @@ def _run_delete_role_mapping(name: str, service_name: str, record: AppRecord) ->
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database,
                            ResourceTier(record.resource_tier), constants_list,
-                           record.use_caller_rights, record.license_id, None)
+                           record.use_caller_rights, record.license_id, None,
+                           record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
         if not _poll_status(service_name, "RUNNING", timeout_secs=300):
             registry.update_app(name, {"last_deploy_status": "FAILED"})
