@@ -19,7 +19,6 @@ import streamlit as st
 
 from branding import apply_branding
 from setup_checks import run_checks
-from spec_approval import approve_caller_token_spec, get_caller_token_spec_status
 
 st.set_page_config(page_title="Setup / Verify", layout="wide")
 apply_branding()
@@ -168,35 +167,31 @@ st.info(
 # --- Step 5b: approve the app's caller-token validity request ---------------
 st.subheader("5b - Approve extended caller token validity")
 st.caption(
-    "Required. The app requests 30-minute caller-token validity for its own "
-    "services via an app specification. Approve it once, or the services fall "
-    "back to the 120s default and operator-role resolution fails with "
-    "OAUTH_ACCESS_TOKEN_EXPIRED."
+    "Required, one-time. At install the app requests 30-minute caller-token "
+    "validity for its own services via an app specification. Approve it once, or "
+    "the services fall back to the 120s default and operator-role resolution "
+    "fails with OAUTH_ACCESS_TOKEN_EXPIRED. This is a consumer action - the app "
+    "runs with restricted caller's rights and cannot approve its own "
+    "specification, so approve it in Snowsight or with the SQL below (as a role "
+    "holding MANAGE APPLICATION SPECIFICATIONS, e.g. ACCOUNTADMIN), not from "
+    "inside this app."
 )
-status = get_caller_token_spec_status(app_name)
-if status.state and "approv" in status.state.lower():
-    st.success("Extended caller token validity: approved")
-elif status.exists:
-    st.warning(f"Extended caller token validity: pending ({status.detail})")
-    if st.button("Approve extended caller token validity", type="primary"):
-        ok, message = approve_caller_token_spec(app_name, status.sequence_number)
-        (st.success if ok else st.error)(message)
-else:
-    st.info(
-        "No pending request yet - upgrade the app to the patch that requests "
-        "it, then re-check."
-    )
-with st.expander("Approve manually"):
-    st.caption(
-        "Use this if the operator lacks MANAGE APPLICATION SPECIFICATIONS or "
-        "self-approval is blocked. Also available in Snowsight: app security "
-        "details, permissions tab."
-    )
-    st.code(
-        f"""SHOW SPECIFICATIONS IN APPLICATION {app_name};
+st.markdown(
+    "**In Snowsight:** open the application's security details, go to the "
+    "permissions tab, and approve **Extended caller token validity**."
+)
+st.markdown("**Or with SQL:**")
+st.code(
+    f"""-- 1. Find the pending request's sequence number (row named CALLER_TOKEN_SPEC):
+SHOW SPECIFICATIONS IN APPLICATION {app_name};
+-- 2. Approve it, using that sequence_number:
 ALTER APPLICATION {app_name} APPROVE SPECIFICATION caller_token_spec SEQUENCE_NUMBER = <n>;""",
-        language="sql",
-    )
+    language="sql",
+)
+st.caption(
+    "Approval cascades to every service the app owns, present and future, and "
+    "persists across app upgrades."
+)
 
 # --- Step 6: grant the app access to the data each Mendix app queries --------
 st.subheader("6 - Grant the app read access to the Snowflake data your Mendix apps query")

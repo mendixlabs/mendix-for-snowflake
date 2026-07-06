@@ -55,23 +55,12 @@ def open_caller_session() -> "snowflake.connector.SnowflakeConnection | None":
     if not caller_token:
         return None
     compound = f"{_read_service_token()}.{caller_token}"
-    conn = snowflake.connector.connect(
+    return snowflake.connector.connect(
         host=os.environ["SNOWFLAKE_HOST"],
         account=os.environ["SNOWFLAKE_ACCOUNT"],
         token=compound,
         authenticator="oauth",
     )
-    # The compound token lands the session in the operator's default role, which
-    # for many operators cannot see ACCOUNTADMIN-owned prerequisites (the Postgres
-    # instance, the EAI) or the app's specifications. Activate all of the
-    # operator's granted roles as secondary roles so what the session sees matches
-    # what the operator is actually entitled to. Best-effort: if the session does
-    # not permit it, fall back to the primary role rather than failing outright.
-    try:
-        conn.cursor().execute("USE SECONDARY ROLES ALL")
-    except Exception:
-        pass
-    return conn
 
 
 def list_operator_roles() -> tuple[str, ...]:
