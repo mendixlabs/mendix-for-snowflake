@@ -116,9 +116,12 @@ GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO APPLICATION MENDIX_SPCS_APP;
 GRANT APPLICATION ROLE MENDIX_SPCS_APP.app_admin TO ROLE ACCOUNTADMIN;
 
 -- Required for executeAsCaller services (cannot be set by the app itself).
--- The app requests this via an app specification; approve the pending
--- request (also doable in Snowsight: app security details -> permissions
--- tab, or via the admin UI Setup page's approve button).
+-- The app requests this via an app specification; approve the pending request
+-- as a role holding MANAGE APPLICATION SPECIFICATIONS (the installing role that
+-- owns the app, e.g. ACCOUNTADMIN, qualifies). Also doable in Snowsight: app
+-- security details -> permissions tab. The admin UI Setup page (step 5b) shows
+-- these same steps - the app cannot approve its own spec (restricted caller's
+-- rights), so this stays a consumer action.
 SHOW SPECIFICATIONS IN APPLICATION MENDIX_SPCS_APP;
 ALTER APPLICATION MENDIX_SPCS_APP APPROVE SPECIFICATION caller_token_spec SEQUENCE_NUMBER = <n>;
 
