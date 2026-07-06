@@ -24,9 +24,11 @@ def mock_controller(monkeypatch):
 
         import controller_client as cc_module
 
-        fake_httpx = types.SimpleNamespace(
-            Client=lambda **kw: real_httpx.Client(transport=real_httpx.MockTransport(handler), **kw)
-        )
+        # Preserve every real httpx attribute (RequestError, ConnectError, etc. -
+        # controller_client references these for exception handling) and override
+        # only Client, so requests are served by the in-memory MockTransport.
+        fake_httpx = types.SimpleNamespace(**vars(real_httpx))
+        fake_httpx.Client = lambda **kw: real_httpx.Client(transport=real_httpx.MockTransport(handler), **kw)
         monkeypatch.setattr(cc_module, "httpx", fake_httpx)
         return ControllerClient("http://controller.test", operator=operator, roles=roles)
 

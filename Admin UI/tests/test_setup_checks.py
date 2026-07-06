@@ -100,6 +100,18 @@ class TestRunChecks:
         assert results[0].ok is False
         assert results[0].label == "Caller-rights session"
 
+    def test_open_caller_session_raises_returns_failing_result_not_raise(self, monkeypatch):
+        def _raise():
+            raise RuntimeError("OAUTH_ACCESS_TOKEN_EXPIRED")
+
+        monkeypatch.setattr(sc, "open_caller_session", _raise)
+        results = sc.run_checks("inst", "eai", "DB.SCHEMA.SECRET")
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert results[0].label == "Caller-rights session"
+        assert "OAUTH_ACCESS_TOKEN_EXPIRED" in results[0].detail
+        assert "5b" in results[0].detail
+
     def test_happy_path_three_results_conn_closed(self, monkeypatch, fake_cursor, fake_conn):
         cur = fake_cursor([
             (lambda sql: "POSTGRES INSTANCES" in sql, ["name", "state"], [("inst", "READY")]),

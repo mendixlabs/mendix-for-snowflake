@@ -31,7 +31,16 @@ def _is_recoverable(exc: Exception) -> bool:
 _lock = threading.RLock()
 _conn: snowflake.connector.SnowflakeConnection | None = None
 
-_DB_SCHEMA = os.environ["DB_SCHEMA"]
+def require_env(name: str) -> str:
+    """Read a required env var, raising a clear RuntimeError instead of a bare
+    KeyError if a future service-spec edit ever drops it."""
+    try:
+        return os.environ[name]
+    except KeyError:
+        raise RuntimeError(f"Missing required env var: {name}") from None
+
+
+_DB_SCHEMA = require_env("DB_SCHEMA")
 
 
 def _read_token() -> str:
@@ -229,15 +238,18 @@ def show_all_service_statuses() -> dict[str, str]:
 
 
 def get_service_endpoint(name: str) -> str | None:
-    rows = execute_sql(f"SHOW ENDPOINTS IN SERVICE {_DB_SCHEMA}.{name}")
-    for row in rows:
-        url = row.get("ingress_url")
-        # While ingress is still provisioning, SHOW ENDPOINTS returns a
-        # human-readable message ("Endpoints provisioning in progress. ...")
-        # in this column rather than a host. A real host has a dot and no
-        # spaces; anything else means "not available yet".
-        if url and "." in url and " " not in url:
-            return url if url.startswith("https://") else f"https://{url}"
+    try:
+        rows = execute_sql(f"SHOW ENDPOINTS IN SERVICE {_DB_SCHEMA}.{name}")
+        for row in rows:
+            url = row.get("ingress_url")
+            # While ingress is still provisioning, SHOW ENDPOINTS returns a
+            # human-readable message ("Endpoints provisioning in progress. ...")
+            # in this column rather than a host. A real host has a dot and no
+            # spaces; anything else means "not available yet".
+            if url and "." in url and " " not in url:
+                return url if url.startswith("https://") else f"https://{url}"
+    except Exception:
+        return None
     return None
 
 

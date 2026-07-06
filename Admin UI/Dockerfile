@@ -68,4 +68,5 @@ CMD ["/usr/local/bin/streamlit", "run", "app/streamlit_app.py", \
      "--server.headless=true", \
      "--server.enableXsrfProtection=false", \
      "--server.enableCORS=false", \
-     "--browser.gatherUsageStats=false"]
+     "--browser.gatherUsageStats=false", \
+     "--client.showErrorDetails=none"]

@@ -76,19 +76,19 @@ async def log_operator(request: Request, call_next):
             logger.exception("Failed to record activity row")
     return response
 
-DB_SCHEMA = os.environ["DB_SCHEMA"]
+DB_SCHEMA = sf.require_env("DB_SCHEMA")
 # DB_SCHEMA is "<db>.APP_PUBLIC"; per-app schemas live next to it in the same
 # database. Empty prefix when unqualified (local dev outside SPCS).
 _DB_PREFIX = DB_SCHEMA.rsplit(".", 1)[0] + "." if "." in DB_SCHEMA else ""
-COMPUTE_POOL = os.environ["COMPUTE_POOL"]
-IMAGE_REPO = os.environ["IMAGE_REPO"]
+COMPUTE_POOL = sf.require_env("COMPUTE_POOL")
+IMAGE_REPO = sf.require_env("IMAGE_REPO")
 # Full image reference for per-app Mendix base services. Dev default is the repo
 # path + :latest; the release build (build-and-push.ps1) pins this to an immutable
 # @sha256 digest in the controller's service spec, so a frozen app version always
 # launches the exact image that passed the security review (not a moving :latest).
 MENDIX_BASE_IMAGE = os.environ.get("MENDIX_BASE_IMAGE", f"/{IMAGE_REPO}:latest")
-PG_EAI = os.environ["PG_EAI"]
-QUERY_WAREHOUSE = os.environ["QUERY_WAREHOUSE"]
+PG_EAI = sf.require_env("PG_EAI")
+QUERY_WAREHOUSE = sf.require_env("QUERY_WAREHOUSE")
 DEPLOY_STAGE = f"@{DB_SCHEMA}.MENDIX_DEPLOY_STAGE"
 DEPLOY_STAGE_MOUNT = "/mnt/deploy-stage"
 
@@ -409,7 +409,7 @@ def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
     # req.pg_database is the target database name, not the password.
     _, pg_password = _load_pg_credentials()
     if not pg_password:
-        raise HTTPException(status_code=500, detail="Controller PG credentials not mounted at /secrets/pg")
+        raise HTTPException(status_code=409, detail="Controller PG credentials not mounted at /secrets/pg")
     sf.create_or_replace_secret(_secret_fqn(app_schema, "PG_PASS"), pg_password)
     sf.create_or_replace_secret(_secret_fqn(app_schema, "ADMIN_PASS"), req.admin_password)
 

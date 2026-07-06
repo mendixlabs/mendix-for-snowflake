@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import textwrap
 from typing import Optional
@@ -12,7 +11,7 @@ from . import snowflake_client as sf
 
 logger = logging.getLogger(__name__)
 
-_TABLE = f"{os.environ['DB_SCHEMA']}.MENDIX_ACTIVITY"
+_TABLE = f"{sf.require_env('DB_SCHEMA')}.MENDIX_ACTIVITY"
 
 _ACTION_PATTERNS = [
     (re.compile(r"^/apps/([^/]+)/trigger-deploy$"), "deploy"),

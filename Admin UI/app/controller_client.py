@@ -60,7 +60,10 @@ class ControllerClient:
         self._client.close()
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        r = self._client.request(method, path, **kwargs)
+        try:
+            r = self._client.request(method, path, **kwargs)
+        except httpx.RequestError as e:
+            raise ControllerError(503, f"Controller unreachable: {e}") from e
         if r.status_code >= 400:
             body = None
             try:

@@ -49,9 +49,8 @@ class TestHeaderConstruction:
 
         handler = recording_handler(_ok([]))
         monkeypatch.delenv("INTERNAL_AUTH_TOKEN", raising=False)
-        fake_httpx = types.SimpleNamespace(
-            Client=lambda **kw: real_httpx.Client(transport=real_httpx.MockTransport(handler), **kw)
-        )
+        fake_httpx = types.SimpleNamespace(**vars(real_httpx))
+        fake_httpx.Client = lambda **kw: real_httpx.Client(transport=real_httpx.MockTransport(handler), **kw)
         monkeypatch.setattr(cc_module, "httpx", fake_httpx)
         client = ControllerClient("http://controller.test/", operator="bob")
         client.list_apps()
@@ -84,6 +83,28 @@ class TestRequestErrorHandling:
         err = exc_info.value
         assert err.message == "upstream error"
         assert err.body == {}
+
+    def test_connect_error_becomes_503_controller_error(self, mock_controller, recording_handler):
+        def _raise_connect_error(request):
+            raise httpx.ConnectError("connection refused", request=request)
+
+        handler = recording_handler(_raise_connect_error)
+        client = mock_controller(handler)
+        with pytest.raises(ControllerError) as exc_info:
+            client.list_apps()
+        err = exc_info.value
+        assert err.status_code == 503
+        assert "Controller unreachable" in err.message
+
+    def test_read_timeout_becomes_503_controller_error(self, mock_controller, recording_handler):
+        def _raise_read_timeout(request):
+            raise httpx.ReadTimeout("timed out", request=request)
+
+        handler = recording_handler(_raise_read_timeout)
+        client = mock_controller(handler)
+        with pytest.raises(ControllerError) as exc_info:
+            client.get_app("myapp")
+        assert exc_info.value.status_code == 503
 
 
 class TestMissingConstants:

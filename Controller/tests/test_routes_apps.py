@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import yaml
 
+from app import main
 from app.models import HIDDEN_VALUE
 
 
@@ -70,10 +71,21 @@ class TestCreateAppHappyPath:
                            json=_create_payload(constants={"Mod.A": HIDDEN_VALUE}))
         assert resp.status_code == 422
 
-    def test_missing_pg_password_500(self, client, fake_sf, role_headers, monkeypatch):
+    def test_missing_pg_password_409(self, client, fake_sf, role_headers, monkeypatch):
         monkeypatch.setenv("PG_PASS", "")
         resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
-        assert resp.status_code == 500
+        assert resp.status_code == 409
+
+    def test_missing_pg_password_via_load_pg_credentials_monkeypatch_409(
+        self, client, fake_sf, role_headers, monkeypatch
+    ):
+        # Mirrors the task's stated approach: monkeypatch _load_pg_credentials
+        # directly to return an empty password, rather than going through the
+        # env-var/global-cache path exercised above.
+        monkeypatch.setattr(main, "_load_pg_credentials", lambda: ("localhost:5432", ""))
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Controller PG credentials not mounted at /secrets/pg"
 
     def test_invalid_body_bad_name_pattern_422(self, client, role_headers):
         resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),

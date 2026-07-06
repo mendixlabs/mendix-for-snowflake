@@ -199,6 +199,13 @@ class TestGetServiceEndpoint:
         fake_execute_sql.returns = [[{"ingress_url": "https://abc.snowflakecomputing.app"}]]
         assert sf.get_service_endpoint("myapp_service") == "https://abc.snowflakecomputing.app"
 
+    def test_swallows_exceptions(self, monkeypatch):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        assert sf.get_service_endpoint("myapp_service") is None
+
 
 class TestGetServiceLogs:
     def test_uses_bound_params_not_interpolation(self, fake_execute_sql):

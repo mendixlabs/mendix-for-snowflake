@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Optional
 
 from . import snowflake_client as sf
 from .models import AppRecord, HIDDEN_VALUE
 
-_TABLE = f"{os.environ['DB_SCHEMA']}.MENDIX_APPS"
+_TABLE = f"{sf.require_env('DB_SCHEMA')}.MENDIX_APPS"
 
 
 def _mask_constants(constants: dict) -> dict:

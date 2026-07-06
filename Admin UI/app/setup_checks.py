@@ -82,7 +82,15 @@ def run_checks(instance: str, eai: str, secret_fqn: str) -> list[CheckResult]:
     Returns one CheckResult per prerequisite. If no caller-rights session is
     available, returns a single failing result explaining why.
     """
-    conn = open_caller_session()
+    try:
+        conn = open_caller_session()
+    except Exception as e:  # e.g. OAUTH_ACCESS_TOKEN_EXPIRED when 5b isn't approved yet
+        return [CheckResult(
+            "Caller-rights session",
+            False,
+            f"could not open a caller-rights session: {e}. This usually means "
+            "extended caller-token validity (setup step 5b) has not been approved yet.",
+        )]
     if conn is None:
         return [CheckResult(
             "Caller-rights session",
