@@ -14,7 +14,7 @@ import streamlit as st
 from auth import client, operator_roles
 from branding import apply_branding
 from controller_client import ControllerError
-from data import list_apps
+from data import list_apps, pad_filename
 
 st.set_page_config(page_title="Apps", layout="wide")
 apply_branding()
@@ -91,6 +91,7 @@ table_rows = [
         "service_status": a.get("service_status") or "",
         "last_deploy_status": a.get("last_deploy_status") or "",
         "endpoint_url": a.get("endpoint_url") or "",
+        "pad_file": pad_filename(a.get("pad_stage_path")),
         "last_deployed_at": a.get("last_deployed_at") or "",
     }
     for a in apps
@@ -138,6 +139,7 @@ def _detail_panel(selected_name: str) -> None:
     st.write(f"Database: `{record.get('pg_database')}`  |  "
              f"Caller rights: `{record.get('use_caller_rights')}`  |  "
              f"Last deployed: `{record.get('last_deployed_at') or '—'}`")
+    st.write(f"Deployed PAD: `{record.get('pad_stage_path') or '(none deployed yet)'}`")
 
     action_cols = st.columns(4)
     with action_cols[0]:

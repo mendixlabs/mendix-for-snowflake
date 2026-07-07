@@ -217,14 +217,32 @@ class TestLoadPgCredentials:
 
 
 class TestResolveStagedPad:
-    def test_current_zip_preferred(self, tmp_path, monkeypatch):
+    def test_lone_current_zip_still_resolves(self, tmp_path, monkeypatch):
+        # Backward compat: current.zip is no longer special-cased, but it's still
+        # a perfectly ordinary .zip - an app staged the old way (before this
+        # preference was removed) with only current.zip present keeps working.
         monkeypatch.setattr(main, "DEPLOY_STAGE_MOUNT", str(tmp_path))
         app_dir = tmp_path / "apps" / "myapp"
         app_dir.mkdir(parents=True)
-        (app_dir / "other.zip").write_bytes(b"x")
         (app_dir / "current.zip").write_bytes(b"y")
         result = main._resolve_staged_pad("myapp")
         assert os.path.basename(result) == "current.zip"
+
+    def test_current_zip_no_longer_special_cased(self, tmp_path, monkeypatch):
+        # O8: current.zip must not win just by having the canonical name. A
+        # newer build staged under any other filename outranks an older
+        # leftover current.zip from a previous deploy.
+        monkeypatch.setattr(main, "DEPLOY_STAGE_MOUNT", str(tmp_path))
+        app_dir = tmp_path / "apps" / "myapp"
+        app_dir.mkdir(parents=True)
+        stale = app_dir / "current.zip"
+        fresh = app_dir / "MyReleasePad_20260707.zip"
+        stale.write_bytes(b"x")
+        fresh.write_bytes(b"y")
+        os.utime(stale, (1000, 1000))
+        os.utime(fresh, (2000, 2000))
+        result = main._resolve_staged_pad("myapp")
+        assert os.path.basename(result) == "MyReleasePad_20260707.zip"
 
     def test_no_dir_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(main, "DEPLOY_STAGE_MOUNT", str(tmp_path))

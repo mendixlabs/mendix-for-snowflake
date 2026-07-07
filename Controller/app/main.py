@@ -632,14 +632,14 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
 def _resolve_staged_pad(name: str) -> str | None:
     """Find the PAD a consumer staged under apps/<name>/.
 
-    Prefer current.zip (the canonical name). Otherwise accept the newest .zip in
-    the directory, so the documented `snow stage copy <yourpad>.zip @.../apps/<name>/`
-    one-liner works without forcing the consumer to rename the file first.
+    Always the newest .zip in the directory by mtime - no special-casing of
+    any filename (in particular, no current.zip preference). That means the
+    documented `snow stage copy <yourpad>.zip @.../apps/<name>/` one-liner
+    works with the operator's own filename, and staging a fresh build under a
+    new name always wins over an older file left behind under any name,
+    including a current.zip from before this preference was removed.
     """
     app_dir = os.path.join(DEPLOY_STAGE_MOUNT, "apps", name)
-    canonical = os.path.join(app_dir, "current.zip")
-    if os.path.isfile(canonical):
-        return canonical
     if not os.path.isdir(app_dir):
         return None
     zips = [
@@ -655,7 +655,7 @@ def _resolve_staged_pad(name: str) -> str | None:
 @app.post("/apps/{name}/trigger-deploy", status_code=202)
 def trigger_deploy(name: str, background_tasks: BackgroundTasks,
                    roles: set[str] = Depends(caller_roles)):
-    """Trigger deploy from a PAD already staged under apps/{name}/ (current.zip or newest .zip)."""
+    """Trigger deploy from whichever .zip is newest under apps/{name}/ (any filename)."""
     _record_for_mutation(name, roles)
     pad_path = _resolve_staged_pad(name)
     if pad_path is None:

@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS app_public.MENDIX_APPS (
     resource_tier      VARCHAR    DEFAULT 'medium',
     use_caller_rights  BOOLEAN    DEFAULT FALSE,
     constants          VARIANT,                      -- { "Module.Name": "value" }
-    pad_stage_path     VARCHAR,                      -- relative: apps/{name}/current.zip
+    pad_stage_path     VARCHAR,                      -- relative: apps/{name}/<resolved filename>.zip
     endpoint_url       VARCHAR,
     last_deploy_status VARCHAR,                      -- DEPLOYING | READY | FAILED
     created_at         TIMESTAMP  DEFAULT CURRENT_TIMESTAMP,
@@ -76,8 +76,9 @@ CREATE STAGE IF NOT EXISTS app_public.MENDIX_DEPLOY_STAGE
 -- Power-user CLI deploy path (PLAN section 5.5): large PADs exceed the SPCS ingress
 -- upload limit on the browser->Streamlit hop, so consumers cannot push them through
 -- the admin UI. Granting READ+WRITE on the deploy stage to app_admin lets a consumer
--- holding app_admin `snow stage copy` the PAD straight to apps/<name>/current.zip,
--- then trigger the deploy (Apps page "Redeploy" / POST /apps/<name>/trigger-deploy).
+-- holding app_admin `snow stage copy` the PAD straight to apps/<name>/ (any
+-- filename - the controller deploys whichever .zip is newest there), then
+-- trigger the deploy (Apps page "Redeploy" / POST /apps/<name>/trigger-deploy).
 GRANT READ, WRITE ON STAGE app_public.MENDIX_DEPLOY_STAGE TO APPLICATION ROLE app_admin;
 
 -- Single-row readiness state. Each callback records its own precondition here and

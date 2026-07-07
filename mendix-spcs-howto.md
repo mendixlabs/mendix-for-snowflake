@@ -219,7 +219,7 @@ for `PRIVILEGED_ROLES` members.
 #    in a filename nests the file as <name>.zip/<name>.zip):
 snow stage copy "MyApp_portable.zip" "@MENDIX_SPCS_APP.app_public.MENDIX_DEPLOY_STAGE/apps/my-app/"
 
-# 2. Trigger the deploy (202; the controller prefers current.zip, else the newest .zip):
+# 2. Trigger the deploy (202; the controller deploys whichever .zip is newest, any filename):
 $headers = @{ Authorization = 'Snowflake Token="<PAT>"' }
 Invoke-RestMethod -Method Post -Headers $headers `
   -Uri "https://<controller-ingress>/apps/my-app/trigger-deploy"
