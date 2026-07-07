@@ -392,6 +392,9 @@ public class HeaderSSOHandler extends RequestHandler {
             if (changed) {
                 Core.commit(systemContext, userObj);
             }
+            Core.getLogger(LOG_NODE).info(
+                "Role sync succeeded for " + user.getName() + "; userroles: " + target
+                + (changed ? " (updated)" : " (unchanged)"));
         } catch (CoreException e) {
             Core.getLogger(LOG_NODE).warn(
                 "Role sync failed to apply for " + user.getName() + "; "
