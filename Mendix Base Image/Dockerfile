@@ -11,8 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /mendix
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh \
-    && useradd --system --no-create-home mendixuser \
+    && useradd --system --no-create-home --home-dir /mendix mendixuser \
     && chown -R mendixuser:mendixuser /mendix
 USER mendixuser
+# --home-dir /mendix (not just $HOME below) matters: the JDK reads user.home from
+# getpwuid()'s passwd entry, not from $HOME - without it, java.util.prefs.
+# FileSystemPreferences keeps resolving to /home/mendixuser (unwritable, since
+# --no-create-home never made it), and every ~30s sync retries mkdir/lock there and
+# logs a BackingStoreException. $HOME is still set for shell tools that do read it.
+ENV HOME=/mendix
 EXPOSE 8080 8090
 CMD ["./entrypoint.sh"]

@@ -386,8 +386,14 @@ def _detail_panel(selected_name: str) -> None:
             st.error(mapping_parse_error)
         elif parsed_mapping is not None:
             if any(k.startswith("<SNOWFLAKE_ROLE_FOR_") for k in parsed_mapping):
-                st.warning("Replace the `<SNOWFLAKE_ROLE_FOR_...>` placeholder keys with real "
-                          "Snowflake account role names before saving.")
+                st.warning(
+                    "One or more `<SNOWFLAKE_ROLE_FOR_...>` placeholder keys are still present. "
+                    "Saving is not blocked, but a placeholder never matches a real Snowflake role, "
+                    "so that userrole stays unmapped - affected users get the app's default "
+                    "userrole instead. Either replace the placeholder with a real account role "
+                    "name to map it, or delete that line entirely if you don't want to map it yet "
+                    "- both have the same effect."
+                )
             mapping_diff_lines = _diff_constants(current_mapping, parsed_mapping)
             if mapping_diff_lines:
                 st.caption("Pending changes:")
@@ -420,6 +426,12 @@ def _detail_panel(selected_name: str) -> None:
                 st.error(str(e))
 
         if current_mapping:
+            st.caption(
+                "Removing clears the entire mapping (every entry at once), not just one role - "
+                "to drop a single role, delete its line in the JSON above and click **Save role "
+                "mapping** instead. Either way, changes are not retroactive: a user already "
+                "logged in keeps their current session's role until they log in again."
+            )
             rolemap_remove_confirm = st.checkbox(
                 "Confirm removal (end-users revert to the default userrole after restart)",
                 key=f"rolemap-remove-confirm-{selected_name}",

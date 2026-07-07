@@ -29,6 +29,15 @@ fi
 
 chmod +x /mendix/pad/bin/start
 
+# The Snowflake JDBC driver bundles Apache Arrow, which reflectively pokes
+# java.nio.Buffer.address for off-heap memory management. Java 9+'s module
+# system blocks that access by default (InaccessibleObjectException), which
+# permanently breaks every JDBC query on this JVM the first time the driver
+# builds an Arrow-backed result set (java.lang.ExceptionInInitializerError,
+# cached for the JVM's lifetime). The java launcher reads JDK_JAVA_OPTIONS
+# automatically since JDK 9, regardless of how bin/start invokes it.
+export JDK_JAVA_OPTIONS="--add-opens=java.base/java.nio=ALL-UNNAMED"
+
 # Read file-based secrets from /snowflake/secrets/ and export as env vars
 SECRETS_DIR="/secrets"
 if [ -d "$SECRETS_DIR" ]; then

@@ -164,7 +164,8 @@ class TestRoleMappingSurvivesRestarts:
 
     def test_update_constants_keeps_role_mapping(self, client, fake_sf, fake_registry, make_record, role_headers):
         record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"},
-                             role_mapping={"ROLE_A": "Administrator"})
+                             role_mapping={"ROLE_A": "Administrator"},
+                             pad_stage_path="apps/myapp/current.zip")
         fake_registry.add(record)
         resp = client.put("/apps/myapp/constants", headers=role_headers("OWNER_ROLE"),
                           json={"constants": {"Mod.A": "new-value"}})
@@ -215,7 +216,8 @@ class TestUpdateConstants:
 
     def test_changed_value_202_secret_written_synchronously(self, client, fake_sf, fake_registry,
                                                              make_record, role_headers):
-        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"})
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"},
+                             pad_stage_path="apps/myapp/current.zip")
         fake_registry.add(record)
         resp = client.put("/apps/myapp/constants", headers=role_headers("OWNER_ROLE"),
                           json={"constants": {"Mod.A": "new-value"}})
@@ -228,7 +230,8 @@ class TestUpdateConstants:
     def test_failed_restart_still_persists_constants(self, client, fake_sf, fake_registry, make_record,
                                                       role_headers, monkeypatch):
         from app import main
-        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"})
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"},
+                             pad_stage_path="apps/myapp/current.zip")
         fake_registry.add(record)
         monkeypatch.setattr(main, "_poll_status", lambda *a, **k: False)
         resp = client.put("/apps/myapp/constants", headers=role_headers("OWNER_ROLE"),
@@ -237,6 +240,22 @@ class TestUpdateConstants:
         final = fake_registry.get_app("myapp")
         assert final.constants == {"Mod.A": "new-value"}
         assert final.last_deploy_status == "FAILED"
+
+    def test_no_pad_deployed_yet_409(self, client, fake_sf, fake_registry, make_record, role_headers):
+        # Regression guard for the 2026-07-07 dry-run finding: saving constants
+        # before ever calling trigger-deploy must not silently restart the
+        # service against whatever PAD happens to be staged at the conventional
+        # apps/{name}/current.zip fallback path - that path skips _prepare_deploy,
+        # so pad_stage_path and user_roles never get recorded even though the
+        # restart can appear to succeed.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"},
+                             pad_stage_path=None)
+        fake_registry.add(record)
+        resp = client.put("/apps/myapp/constants", headers=role_headers("OWNER_ROLE"),
+                          json={"constants": {"Mod.A": "new-value"}})
+        assert resp.status_code == 409
+        assert fake_sf.calls_for("create_or_replace_secret") == []
+        assert fake_sf.calls_for("alter_service_spec") == []
 
     def test_invalid_constant_name_422(self, client, role_headers):
         resp = client.put("/apps/myapp/constants", headers=role_headers("OWNER_ROLE"),

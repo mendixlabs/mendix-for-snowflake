@@ -715,6 +715,21 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
     if not changed:
         return {"status": "UNCHANGED"}
 
+    # An app with no PAD ever deployed has no pad_stage_path; _build_spec falls
+    # back to the conventional apps/{name}/current.zip path when rebuilding the
+    # spec, which can restart a service that happens to find a PAD staged there
+    # without ever running _prepare_deploy's parsing (user_roles, pad_stage_path
+    # itself). Require an explicit Redeploy first so those fields are always
+    # populated by the code path that actually parses the PAD.
+    if record.pad_stage_path is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"App '{name}' has no PAD deployed yet - Redeploy first, then "
+                   "update constants. Saving constants alone would restart the "
+                   "service against whatever PAD happens to be staged without "
+                   "recording it or detecting its userroles.",
+        )
+
     for const_name, value in changed.items():
         sf.create_or_replace_secret(_secret_fqn(record.app_schema, _const_secret_name(const_name)), value)
 

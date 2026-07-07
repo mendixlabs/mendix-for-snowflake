@@ -268,6 +268,12 @@ public class HeaderSSOHandler extends RequestHandler {
         props.put("loginTimeout", JDBC_LOGIN_TIMEOUT_SECS);
         props.put("networkTimeout", 10000);
 
+        // Force-register the driver: DriverManager's ServiceLoader-based
+        // auto-discovery depends on the calling thread's context classloader,
+        // which a Mendix Java action's userlib jar does not reliably set,
+        // causing "No suitable driver" even though the jar is on the classpath.
+        Class.forName("net.snowflake.client.api.driver.SnowflakeDriver");
+
         // No warehouse: CURRENT_AVAILABLE_ROLES() is a session function, run
         // warehouse-less the same way the Admin UI runs it in production.
         try (Connection conn = DriverManager.getConnection(url, props);
