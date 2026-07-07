@@ -297,7 +297,9 @@ def make_record():
             use_caller_rights=False,
             constants={},
             owner_role="OWNER_ROLE",
-            pad_stage_path=None,
+            # A READY app has a deployed PAD; tests that need the pre-deploy state
+            # (no PAD staged) override pad_stage_path=None explicitly.
+            pad_stage_path=f"apps/{name}/current.zip",
             endpoint_url=None,
             last_deploy_status="READY",
             created_at=None,

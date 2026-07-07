@@ -276,6 +276,24 @@ class TestResolveStagedPad:
         result = main._resolve_staged_pad("myapp")
         assert os.path.basename(result) == "PAD.ZIP"
 
+    def test_mtime_tie_broken_deterministically_by_name(self, tmp_path, monkeypatch):
+        # Two zips sharing an mtime (coarse stage-mount resolution, or two stage
+        # copies in the same second) must resolve deterministically rather than
+        # by os.listdir order. The tie-break is the filename, so the
+        # lexicographically greater name wins - and, critically, the same file
+        # wins on every call.
+        monkeypatch.setattr(main, "DEPLOY_STAGE_MOUNT", str(tmp_path))
+        app_dir = tmp_path / "apps" / "myapp"
+        app_dir.mkdir(parents=True)
+        a = app_dir / "aaa.zip"
+        b = app_dir / "bbb.zip"
+        a.write_bytes(b"x")
+        b.write_bytes(b"y")
+        os.utime(a, (1000, 1000))
+        os.utime(b, (1000, 1000))
+        results = {os.path.basename(main._resolve_staged_pad("myapp")) for _ in range(5)}
+        assert results == {"bbb.zip"}
+
 
 class TestPollStatus:
     def _clock(self, monkeypatch):

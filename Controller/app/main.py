@@ -329,6 +329,28 @@ def _record_for_mutation(name: str, roles: set[str]) -> AppRecord:
     return record
 
 
+def _require_pad_deployed(name: str, record: AppRecord) -> None:
+    """Block a spec-rebuild mutation on an app that has never deployed a PAD.
+
+    Such an app has no pad_stage_path, so _build_spec falls back to the
+    conventional apps/{name}/current.zip path when rebuilding the spec. That
+    could restart the service against whatever PAD happens to be staged there
+    without ever running _prepare_deploy's parsing (user_roles, pad_stage_path
+    itself). Require an explicit Redeploy first so those fields are always
+    populated by the code path that actually parses the PAD. Applies to every
+    endpoint that rebuilds and re-applies the service spec (constants, spec,
+    license, role mapping), not just constants.
+    """
+    if record.pad_stage_path is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"App '{name}' has no PAD deployed yet - Redeploy first. "
+                   "Changing its configuration alone would restart the service "
+                   "against whatever PAD happens to be staged without recording "
+                   "it or detecting its userroles.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -649,7 +671,10 @@ def _resolve_staged_pad(name: str) -> str | None:
     ]
     if not zips:
         return None
-    return max(zips, key=os.path.getmtime)
+    # Break mtime ties by filename so the choice is deterministic even when two
+    # files share a timestamp (coarse stage-mount mtime resolution, or two stage
+    # copies within the same second). os.listdir order alone is not stable.
+    return max(zips, key=lambda z: (os.path.getmtime(z), z))
 
 
 @app.post("/apps/{name}/trigger-deploy", status_code=202)
@@ -715,20 +740,7 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
     if not changed:
         return {"status": "UNCHANGED"}
 
-    # An app with no PAD ever deployed has no pad_stage_path; _build_spec falls
-    # back to the conventional apps/{name}/current.zip path when rebuilding the
-    # spec, which can restart a service that happens to find a PAD staged there
-    # without ever running _prepare_deploy's parsing (user_roles, pad_stage_path
-    # itself). Require an explicit Redeploy first so those fields are always
-    # populated by the code path that actually parses the PAD.
-    if record.pad_stage_path is None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"App '{name}' has no PAD deployed yet - Redeploy first, then "
-                   "update constants. Saving constants alone would restart the "
-                   "service against whatever PAD happens to be staged without "
-                   "recording it or detecting its userroles.",
-        )
+    _require_pad_deployed(name, record)
 
     for const_name, value in changed.items():
         sf.create_or_replace_secret(_secret_fqn(record.app_schema, _const_secret_name(const_name)), value)
@@ -766,6 +778,7 @@ def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
 def update_spec(name: str, req: UpdateSpecRequest, background_tasks: BackgroundTasks,
                 roles: set[str] = Depends(caller_roles)):
     record = _record_for_mutation(name, roles)
+    _require_pad_deployed(name, record)
     if req.resource_tier is None and req.use_caller_rights is None:
         raise HTTPException(
             status_code=400,
@@ -807,6 +820,7 @@ def _run_update_license(name: str, service_name: str, record: AppRecord, license
 def update_license(name: str, req: UpdateLicenseRequest, background_tasks: BackgroundTasks,
                    roles: set[str] = Depends(caller_roles)):
     record = _record_for_mutation(name, roles)
+    _require_pad_deployed(name, record)
     # No HIDDEN_VALUE semantics: the key is write-only, so every PUT carries a real
     # key. Written before the registry/spec update, same ordering as constants.
     sf.create_or_replace_secret(_secret_fqn(record.app_schema, "MX_LICENSE_KEY"), req.license_key)
@@ -842,6 +856,7 @@ def _run_delete_license(name: str, service_name: str, record: AppRecord) -> None
 def delete_license(name: str, background_tasks: BackgroundTasks,
                    roles: set[str] = Depends(caller_roles)):
     record = _record_for_mutation(name, roles)
+    _require_pad_deployed(name, record)
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
     background_tasks.add_task(_run_delete_license, name, record.service_name, record)
     return {"status": "DEPLOYING"}
@@ -876,6 +891,7 @@ def update_role_mapping(name: str, req: UpdateRoleMappingRequest,
                         background_tasks: BackgroundTasks,
                         roles: set[str] = Depends(caller_roles)):
     record = _record_for_mutation(name, roles)
+    _require_pad_deployed(name, record)
     if record.user_roles:
         unknown = sorted(set(req.role_mapping.values()) - set(record.user_roles))
         if unknown:
@@ -886,7 +902,7 @@ def update_role_mapping(name: str, req: UpdateRoleMappingRequest,
             })
     warnings = []
     if not record.user_roles:
-        warnings.append("No userroles detected yet (no PAD deployed); mapping values are unvalidated.")
+        warnings.append("No userroles detected in the deployed PAD; mapping values are unvalidated.")
     if not record.use_caller_rights:
         warnings.append("use_caller_rights is off: no caller token reaches the app, so the "
                         "mapping is inert and all users get the default role until it is enabled.")
@@ -923,6 +939,7 @@ def _run_delete_role_mapping(name: str, service_name: str, record: AppRecord) ->
 def delete_role_mapping(name: str, background_tasks: BackgroundTasks,
                         roles: set[str] = Depends(caller_roles)):
     record = _record_for_mutation(name, roles)
+    _require_pad_deployed(name, record)
     registry.update_app(name, {"last_deploy_status": "DEPLOYING"})
     background_tasks.add_task(_run_delete_role_mapping, name, record.service_name, record)
     return {"status": "DEPLOYING"}

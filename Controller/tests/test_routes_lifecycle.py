@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from app.models import HIDDEN_VALUE
@@ -338,3 +339,33 @@ class TestSuspendResume:
         resp = client.post("/apps/myapp/resume", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 202
         assert fake_registry.get_app("myapp").last_deploy_status == "FAILED"
+
+
+class TestSpecRebuildRequiresPad:
+    """Every endpoint that rebuilds and re-applies the service spec must refuse to
+    run before a PAD has ever been deployed (pad_stage_path is None). Otherwise
+    _build_spec falls back to the apps/{name}/current.zip path and could restart
+    the service without running _prepare_deploy (recording pad_stage_path /
+    user_roles). Regression for the 2026-07-07 dry-run finding, extended from the
+    constants endpoint to its spec / license / role-mapping siblings.
+    """
+
+    @pytest.mark.parametrize("method,path,body", [
+        ("put", "/apps/myapp/spec", {"resource_tier": "large"}),
+        ("put", "/apps/myapp/license", {"license_id": "LIC-1", "license_key": "k"}),
+        ("delete", "/apps/myapp/license", None),
+        ("put", "/apps/myapp/role-mapping", {"role_mapping": {"my_role": "Administrator"}}),
+        ("delete", "/apps/myapp/role-mapping", None),
+    ])
+    def test_no_pad_deployed_yet_409_no_side_effects(
+            self, client, fake_sf, fake_registry, make_record, role_headers, method, path, body):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      pad_stage_path=None))
+        kwargs = {"headers": role_headers("OWNER_ROLE")}
+        if body is not None:
+            kwargs["json"] = body
+        resp = getattr(client, method)(path, **kwargs)
+        assert resp.status_code == 409
+        # The guard runs before any secret write or service restart.
+        assert fake_sf.calls_for("alter_service_spec") == []
+        assert fake_sf.calls_for("create_or_replace_secret") == []
