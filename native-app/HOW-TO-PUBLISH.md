@@ -137,6 +137,31 @@ CALL MENDIX_SPCS_APP.app_public.register_reference(
   SYSTEM$REFERENCE('EXTERNAL_ACCESS_INTEGRATION', 'MENDIX_PG_EAI', 'PERSISTENT', 'USAGE'));
 ```
 
+### Grant data access (for the data-retrieve test)
+
+Before registering a test app and confirming it can query Snowflake data, grant this
+dry-run application object read access the same way a real consumer would: see
+`app/readme.md` ("Granting the app access to your Snowflake data") for the full grant
+set, including the operator's direct role grant. That regular `GRANT SELECT ... TO
+APPLICATION` grant is not sufficient on its own; the query still fails with "must have
+at least one CALLER privilege granted on TABLE ..." until the application also holds a
+separate, distinct grant type:
+
+```sql
+GRANT CALLER USAGE  ON DATABASE <data_db>                       TO APPLICATION MENDIX_SPCS_APP;
+GRANT CALLER USAGE  ON SCHEMA   <data_db>.<data_schema>         TO APPLICATION MENDIX_SPCS_APP;
+GRANT CALLER SELECT ON TABLE    <data_db>.<data_schema>.<table> TO APPLICATION MENDIX_SPCS_APP;
+```
+
+Verify with `SHOW CALLER GRANTS ON TABLE <data_db>.<data_schema>.<table>` or
+`SHOW CALLER GRANTS TO APPLICATION MENDIX_SPCS_APP`.
+
+**Neither grant type survives a reinstall.** Every teardown/reinstall cycle in this
+dry-run (see Teardown below) drops the application object and a fresh `CREATE
+APPLICATION` creates a distinct instance under the same name. Both the regular grants
+and the CALLER grants above are scoped to that instance and must run again after every
+reinstall, which is easy to forget mid-dry-run.
+
 ### Verify
 
 ```sql

@@ -199,10 +199,12 @@ st.caption(
     "Per Mendix app, as needed - not a one-time account step. The controller and "
     "per-app services run with restricted caller's rights (executeAsCaller): a query "
     "against your Snowflake objects succeeds only when BOTH the operator running it "
-    "AND this application object hold the privilege. Grant the app read access to the "
-    "databases, schemas, and objects each Mendix app reads, plus USAGE on its query "
-    "warehouse."
+    "AND this application object hold the privilege DIRECTLY. Grant read access to the "
+    "databases, schemas, and objects each Mendix app reads to both the application and "
+    "the operator's active role, plus USAGE on its query warehouse."
 )
+operator_role = st.text_input("Operator role", value="<operator_role>",
+                              help="The role active when operating/testing this Mendix app.")
 st.code(
     f"""-- Replace the data DB / schema / warehouse with the ones your Mendix app queries.
 -- Grant these BEFORE the app first connects. A grant added while the app is already
@@ -213,12 +215,39 @@ GRANT USAGE  ON DATABASE <data_db>                           TO APPLICATION {app
 GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO APPLICATION {app_name};
 GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO APPLICATION {app_name};
 GRANT SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema> TO APPLICATION {app_name};
-GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO APPLICATION {app_name};""",
+GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO APPLICATION {app_name};
+
+-- The operator's active role needs the same grants directly. Role-hierarchy
+-- inheritance does not satisfy the restricted caller's-rights check: a role that
+-- only inherits access through another role (ACCOUNTADMIN inheriting SYSADMIN's
+-- grants is a common example) still fails here, even though the same session
+-- sees the data fine outside the app.
+GRANT USAGE  ON DATABASE <data_db>                           TO ROLE {operator_role};
+GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO ROLE {operator_role};
+GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO ROLE {operator_role};
+GRANT SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema> TO ROLE {operator_role};
+GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO ROLE {operator_role};""",
+    language="sql",
+)
+st.caption(
+    "The app cannot check the operator-role grant for you (same restricted "
+    "caller's-rights limitation as the Verify section below), so confirm it "
+    "directly in your own Snowsight session, using the role you'll operate this "
+    "Mendix app as:"
+)
+st.code(
+    f"""SHOW GRANTS TO ROLE {operator_role};
+-- Confirm the USAGE/SELECT grants above appear directly on this row. A row that
+-- only shows up because the role inherits it through another role (e.g.
+-- ACCOUNTADMIN inheriting SYSADMIN's grants) does not satisfy the check.""",
     language="sql",
 )
 st.warning(
     "Without these grants the app reports: *the owning application must have at least "
-    "one CALLER privilege granted on TABLE ...*. Snowflake does not allow FUTURE grants "
+    "one CALLER privilege granted on TABLE ...*. If the application grants above are "
+    "already in place and the error persists, check the operator's role next: run "
+    f"`SHOW GRANTS TO ROLE {operator_role}` and confirm the privilege appears directly, "
+    "not only through an inherited role. Snowflake does not allow FUTURE grants "
     "to an application (`Future grant on objects of type TABLE to APPLICATION is "
     "restricted`), so re-run the ALL TABLES / ALL VIEWS grants after you add new objects "
     "the app must read. Run these grants before the app first connects. A privilege "

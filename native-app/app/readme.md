@@ -107,9 +107,9 @@ authenticate with a Programmatic Access Token
 The controller and per-app services run with **restricted caller's rights**
 (`executeAsCaller`): a query against your Snowflake objects succeeds only when
 **both** the operator running it **and** this application object hold the
-privilege. So for each Mendix app, grant the application read access to the
-databases, schemas, and objects that app queries, plus `USAGE` on its query
-warehouse:
+privilege **directly**. So for each Mendix app, grant read access to the
+databases, schemas, and objects that app queries to both the application and
+the operator's active role, plus `USAGE` on its query warehouse:
 
 ```sql
 GRANT USAGE  ON DATABASE <data_db>                           TO APPLICATION <app_name>;
@@ -117,12 +117,61 @@ GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO APPLICATION <app
 GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO APPLICATION <app_name>;
 GRANT SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema> TO APPLICATION <app_name>;
 GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO APPLICATION <app_name>;
+
+-- The operator's active role needs the same grants directly. Role-hierarchy
+-- inheritance does not satisfy the restricted caller's-rights check: an
+-- ACCOUNTADMIN session that only inherits access through SYSADMIN (a common
+-- setup) still fails here, even though the same session sees the data fine
+-- outside the app.
+GRANT USAGE  ON DATABASE <data_db>                           TO ROLE <operator_role>;
+GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO ROLE <operator_role>;
+GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO ROLE <operator_role>;
+GRANT SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema> TO ROLE <operator_role>;
+GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO ROLE <operator_role>;
 ```
 
 Without these grants the app reports: *the owning application `<app_name>` must
-have at least one CALLER privilege granted on TABLE ...*. Snowflake does not
+have at least one CALLER privilege granted on TABLE ...*. If the application
+grants above are already in place and the error persists, check the operator's
+role next: run `SHOW GRANTS TO ROLE <operator_role>` and confirm the privilege
+appears directly, not only through an inherited role. Snowflake does not
 allow `FUTURE` grants to an application, so re-run the `ALL TABLES` / `ALL VIEWS`
 grants after you add new objects the app must read.
+
+### The CALLER grant: a third grant type
+
+That exact error text names a real, separate grant type. `GRANT CALLER
+<privilege> ... TO APPLICATION` is distinct from both the regular `GRANT ...
+TO APPLICATION` grant and the operator's direct role grant above; restricted
+caller's rights requires all three together before a query succeeds. Apply
+this grant in addition to the two above, not instead of them:
+
+```sql
+GRANT CALLER USAGE  ON DATABASE <data_db>                       TO APPLICATION <app_name>;
+GRANT CALLER USAGE  ON SCHEMA   <data_db>.<data_schema>         TO APPLICATION <app_name>;
+GRANT CALLER SELECT ON TABLE    <data_db>.<data_schema>.<table> TO APPLICATION <app_name>;
+```
+
+This form is per table; repeat the last line for every table and view the app
+queries. Snowflake's `GRANT CALLER` reference also documents `GRANT INHERITED
+CALLER SELECT ON ALL TABLES IN SCHEMA ... TO APPLICATION`, which would mirror
+the `ALL TABLES IN SCHEMA` grants above. This project has only verified the
+per-table form live; confirm the `INHERITED` form on your own account before
+relying on it.
+
+Verify the CALLER grant with `SHOW CALLER GRANTS ON TABLE
+<data_db>.<data_schema>.<table>` or `SHOW CALLER GRANTS TO APPLICATION
+<app_name>`. A plain `SHOW GRANTS ON TABLE ...` shows only the regular SELECT
+grant; it says nothing about the CALLER grant, and the two are checked
+separately.
+
+**Neither grant type survives a reinstall.** Dropping and recreating the
+application object, even under the identical app name, creates a distinct
+application instance. Every `GRANT ... TO APPLICATION` and `GRANT CALLER ...
+TO APPLICATION` statement is scoped to that instance and must run again after
+every `DROP APPLICATION` + `CREATE APPLICATION`, which is easy to forget. The
+operator's direct role grants are unaffected, since those are role-scoped
+rather than application-instance-scoped.
 
 **Grant before the app first connects.** A privilege granted after the app has
 already opened its Snowflake session may not be picked up until the app refreshes
