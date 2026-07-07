@@ -103,14 +103,21 @@ def _scroll_script(is_first_render: bool) -> str:
 def _selected_service_status() -> str | None:
     """Live status of the selected app, or None when it isn't known.
 
-    Reuses the `apps` list already fetched for the source picker above, so
-    this costs no extra controller round trip. System sources (controller /
-    admin-ui) have no equivalent status lookup from here, so this is always
-    None for those.
+    Re-fetches from the controller rather than reading the module-level `apps`
+    list, which is captured once at page load. An auto-refresh tick reruns only
+    this fragment, not the enclosing script, so `apps` would be stale and a
+    restart that began after the page loaded would be misclassified. Called only
+    on the 502 failure path, so it adds a round trip only when a fetch has
+    already failed. System sources have no status lookup here, so this is None
+    for those.
     """
     if selected_kind != "app":
         return None
-    return next((a.get("service_status") for a in apps if a["name"] == selected_key), None)
+    try:
+        current = list_apps()
+    except ControllerError:
+        return None
+    return next((a.get("service_status") for a in current if a["name"] == selected_key), None)
 
 
 @st.fragment(run_every=10 if auto else None)

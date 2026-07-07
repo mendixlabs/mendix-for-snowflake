@@ -141,6 +141,11 @@ st.caption(
     "After GET from the listing. The reference binds fire grant_callback / "
     "register_reference, which start the controller and admin UI."
 )
+operator_role = st.text_input(
+    "Operator role", value="<operator_role>",
+    help="The role operators use to manage and test Mendix apps. Substituted "
+         "into the grants in this step and in step 6.",
+)
 st.code(
     f"""GRANT CREATE COMPUTE POOL   ON ACCOUNT TO APPLICATION {app_name};
 GRANT CREATE WAREHOUSE      ON ACCOUNT TO APPLICATION {app_name};
@@ -156,7 +161,7 @@ CALL {app_name}.app_public.register_reference(
   'pg_eai','ADD',    SYSTEM$REFERENCE('EXTERNAL_ACCESS_INTEGRATION','{eai}','PERSISTENT','USAGE'));
 
 -- Let operators manage apps (repeat per operator role):
-GRANT APPLICATION ROLE {app_name}.app_admin TO ROLE <operator_role>;""",
+GRANT APPLICATION ROLE {app_name}.app_admin TO ROLE {operator_role};""",
     language="sql",
 )
 st.info(
@@ -203,8 +208,6 @@ st.caption(
     "databases, schemas, and objects each Mendix app reads to both the application and "
     "the operator's active role, plus USAGE on its query warehouse."
 )
-operator_role = st.text_input("Operator role", value="<operator_role>",
-                              help="The role active when operating/testing this Mendix app.")
 st.code(
     f"""-- Replace the data DB / schema / warehouse with the ones your Mendix app queries.
 -- Grant these BEFORE the app first connects. A grant added while the app is already
