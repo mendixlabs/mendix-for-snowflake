@@ -62,13 +62,16 @@ released artifact is exactly the build that passed these gates.
 
 ## Organizational context
 
-This application is developed by a Siemens business (Mendix). Siemens operates a TÜV SÜD-
-certified secure product development lifecycle under IEC 62443-4-1, and Mendix publishes a
-platform-level secure development lifecycle that includes mandatory peer review, Snyk software
-composition analysis, Veracode SAST, SonarQube quality gates, and monthly external penetration
-tests: https://www.mendix.com/evaluation-guide/security/secure-development-lifecycle/.
+This application is developed by a Siemens business (Mendix). For broader context, Siemens (our
+parent company) holds a TÜV SÜD IEC 62443-4-1 certification covering the secure development
+lifecycle of certain of its product lines, and Mendix publishes a platform-level secure
+development lifecycle that includes mandatory peer review, Snyk software composition analysis,
+Veracode SAST, SonarQube quality gates, and monthly external penetration tests:
+https://www.mendix.com/evaluation-guide/security/secure-development-lifecycle/.
 
-Those are organizational and platform-level controls. They govern the Mendix product platform,
-not this repository. This repository has a single maintainer and does not itself go through the
+Those are organizational and platform-level controls provided for context. The Siemens IEC
+62443-4-1 certification is scoped to specific Siemens product lines and does not itself cover
+this repository, and the Mendix platform controls govern the Mendix product platform, not this
+repository. This repository has a single maintainer and does not itself go through the
 platform's peer review, Snyk, Veracode, SonarQube, or penetration testing. What governs this
 repository is the automated CI pipeline and best-effort remediation described above.
