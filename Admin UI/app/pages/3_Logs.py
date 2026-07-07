@@ -13,6 +13,7 @@ from auth import client, is_privileged_operator
 from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
+from log_status import LARGE_LINES_THRESHOLD, classify_log_fetch_failure
 
 st.set_page_config(page_title="Logs", layout="wide")
 apply_branding()
@@ -46,7 +47,19 @@ selected = selected_label
 
 cols = st.columns([1, 1, 4])
 with cols[0]:
-    lines = st.number_input("Lines", min_value=10, max_value=2000, value=200, step=50)
+    lines = st.number_input(
+        "Lines",
+        min_value=10,
+        max_value=2000,
+        value=200,
+        step=50,
+        help=(
+            f"Values above {LARGE_LINES_THRESHOLD} can take longer to fetch than the "
+            "request timeout window allows; the app keeps running even if the fetch fails."
+        ),
+    )
+    if lines > LARGE_LINES_THRESHOLD:
+        st.caption(f"⚠️ {int(lines)} lines may be slow to fetch and time out.")
 with cols[1]:
     auto = st.toggle("Auto-refresh", value=False, help="Refresh every 10 seconds.")
 
@@ -87,6 +100,19 @@ def _scroll_script(is_first_render: bool) -> str:
     """
 
 
+def _selected_service_status() -> str | None:
+    """Live status of the selected app, or None when it isn't known.
+
+    Reuses the `apps` list already fetched for the source picker above, so
+    this costs no extra controller round trip. System sources (controller /
+    admin-ui) have no equivalent status lookup from here, so this is always
+    None for those.
+    """
+    if selected_kind != "app":
+        return None
+    return next((a.get("service_status") for a in apps if a["name"] == selected_key), None)
+
+
 @st.fragment(run_every=10 if auto else None)
 def _log_view() -> None:
     try:
@@ -96,7 +122,8 @@ def _log_view() -> None:
             logs = client().get_logs(selected_key, lines=int(lines))
     except ControllerError as e:
         if e.status_code == 502:
-            st.info("Container is restarting; retrying...")
+            severity, message = classify_log_fetch_failure(_selected_service_status(), int(lines))
+            getattr(st, severity)(message)
         else:
             st.error(str(e))
         return
