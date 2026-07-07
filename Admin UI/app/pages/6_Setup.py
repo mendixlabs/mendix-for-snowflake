@@ -18,7 +18,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from branding import apply_branding
-from setup_checks import run_checks
+from setup_checks import render_verify_sql
 
 st.set_page_config(page_title="Setup / Verify", layout="wide")
 apply_branding()
@@ -233,13 +233,13 @@ st.divider()
 # --- Verify ------------------------------------------------------------------
 st.subheader("Verify")
 st.caption(
-    "Checks the consumer-owned prerequisites exist, using your own roles. "
-    "pg_secret and pg_eai are app-scoped references and cannot be probed here; "
-    "their binding is already implied - the services (and this page) start only "
-    "after both bind. Postgres egress reachability is confirmed when an app first boots."
+    "The app cannot run this check itself: its own session runs under restricted "
+    "caller's rights (the operator's privileges intersected with the application "
+    "object's), and the app holds no grant on these account-level objects, so it "
+    "can never see them regardless of which roles you have active. Run the SQL "
+    "below in your own Snowsight session instead. pg_secret and pg_eai are "
+    "separately app-scoped references and cannot be probed at all; their binding "
+    "is already implied - the services (and this page) start only after both "
+    "bind. Postgres egress reachability is confirmed when an app first boots."
 )
-if st.button("Run checks", type="primary"):
-    with st.spinner("Querying..."):
-        results = run_checks(instance, eai, secret_fqn)
-    for r in results:
-        (st.success if r.ok else st.error)(f"**{r.label}** - {r.detail}")
+st.code(render_verify_sql(instance, eai, secret_fqn), language="sql")

@@ -1,114 +1,41 @@
-"""Existence/readiness checks for the consumer-owned prerequisites the Native App
-cannot create itself: the Snowflake-managed Postgres instance, the egress EAI, and
-the PG credential secret bound as a reference.
+"""Verification SQL for the consumer-owned prerequisites the Native App cannot
+create itself: the Snowflake-managed Postgres instance, the egress EAI, and the
+PG credential secret bound as a reference.
 
-The checks run in a caller-rights session (auth.open_caller_session), so they
-reflect exactly what the operator's own roles can see. References themselves are
-app-scoped and cannot be probed from the operator session; their binding is
-implied by this admin UI being reachable at all, because the services start only
-after both references bind (setup_script.sql::maybe_start_services).
+This is rendered as a copy-paste block for the operator to run in their own
+Snowsight session, not executed by the app. The app's own session runs under
+restricted caller's rights (the operator's privileges intersected with the
+application object's), and the app holds no grant on these account-level
+objects, so that session can never see them - activating extra roles doesn't
+change that, since the app side of the intersection is the binding constraint.
+
+pg_secret and pg_eai are separately app-scoped references and cannot be probed
+from either session; their binding is implied by this admin UI being reachable
+at all, because the services start only after both references bind
+(setup_script.sql::maybe_start_services).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 
-from auth import open_caller_session
-
-
-@dataclass
-class CheckResult:
-    label: str
-    ok: bool
-    detail: str
-
-
-def _rows(cur) -> list[dict]:
-    """Fetch the current result set as a list of column-name-keyed dicts."""
-    cols = [c[0].lower() for c in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def _find(row: dict, *needles: str) -> str | None:
-    """Return the first value whose column name contains any of the needles."""
-    for key, value in row.items():
-        if any(n in key for n in needles):
-            return str(value)
-    return None
-
-
-def _check_pg_instance(cur, instance: str) -> CheckResult:
-    label = f"Postgres instance `{instance}`"
-    cur.execute(f"SHOW POSTGRES INSTANCES LIKE '{instance}'")
-    rows = _rows(cur)
-    if not rows:
-        return CheckResult(label, False, "not found (create it as ACCOUNTADMIN, step 1)")
-    state = _find(rows[0], "state", "status") or "unknown"
-    ok = "READY" in state.upper() or "ACTIVE" in state.upper()
-    return CheckResult(label, ok, f"state = {state}")
-
-
-def _check_eai(cur, eai: str) -> CheckResult:
-    label = f"External access integration `{eai}`"
-    cur.execute(f"SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '{eai}'")
-    rows = _rows(cur)
-    if not rows:
-        return CheckResult(label, False, "not found (create it as ACCOUNTADMIN, step 2)")
-    enabled = (_find(rows[0], "enabled") or "").lower()
-    ok = enabled in ("true", "")  # some columns omit enabled; presence is enough
-    return CheckResult(label, ok, f"enabled = {enabled or 'present'}")
-
-
-def _check_secret(cur, secret_fqn: str) -> CheckResult:
-    label = f"PG credential secret `{secret_fqn}`"
+def _secret_show_clause(secret_fqn: str) -> str:
+    """SHOW SECRETS clause for a 1-, 2-, or 3-part secret name."""
     parts = secret_fqn.split(".")
     name = parts[-1]
     if len(parts) == 3:
-        scope = f" IN SCHEMA {parts[0]}.{parts[1]}"
-    elif len(parts) == 2:
-        scope = f" IN SCHEMA {parts[0]}"
-    else:
-        scope = ""
-    cur.execute(f"SHOW SECRETS LIKE '{name}'{scope}")
-    rows = _rows(cur)
-    if not rows:
-        return CheckResult(label, False, "not found (create it as ACCOUNTADMIN, step 4)")
-    kind = _find(rows[0], "secret_type", "type") or "present"
-    return CheckResult(label, True, f"type = {kind}")
+        return f"SHOW SECRETS LIKE '{name}' IN SCHEMA {parts[0]}.{parts[1]};"
+    if len(parts) == 2:
+        return f"SHOW SECRETS LIKE '{name}' IN SCHEMA {parts[0]};"
+    return f"SHOW SECRETS LIKE '{name}';"
 
 
-def run_checks(instance: str, eai: str, secret_fqn: str) -> list[CheckResult]:
-    """Verify the three consumer-owned prerequisites exist and look healthy.
+def render_verify_sql(instance: str, eai: str, secret_fqn: str) -> str:
+    """Render the SQL block that checks the three prerequisites exist and look
+    healthy, for the operator to run in their own Snowsight session."""
+    return f"""SHOW POSTGRES INSTANCES LIKE '{instance}';
+-- expect one row, state READY or ACTIVE
 
-    Returns one CheckResult per prerequisite. If no caller-rights session is
-    available, returns a single failing result explaining why.
-    """
-    try:
-        conn = open_caller_session()
-    except Exception as e:  # e.g. OAUTH_ACCESS_TOKEN_EXPIRED when 5b isn't approved yet
-        return [CheckResult(
-            "Caller-rights session",
-            False,
-            f"could not open a caller-rights session: {e}. This usually means "
-            "extended caller-token validity (setup step 5b) has not been approved yet.",
-        )]
-    if conn is None:
-        return [CheckResult(
-            "Caller-rights session",
-            False,
-            "no caller token available - is this service running with executeAsCaller?",
-        )]
-    try:
-        cur = conn.cursor()
-        results: list[CheckResult] = []
-        for fn, arg in (
-            (_check_pg_instance, instance),
-            (_check_eai, eai),
-            (_check_secret, secret_fqn),
-        ):
-            try:
-                results.append(fn(cur, arg))
-            except Exception as e:  # insufficient privilege, object scope, etc.
-                results.append(CheckResult(fn.__name__, False, f"check failed: {e}"))
-        return results
-    finally:
-        conn.close()
+SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '{eai}';
+-- expect one row, enabled = true
+
+{_secret_show_clause(secret_fqn)}
+-- expect one row"""
