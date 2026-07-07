@@ -249,8 +249,13 @@ $$;
 -- 7. maybe_start_services - idempotent readiness gate.
 --    Starts the controller + admin UI only once BOTH the compute pool exists
 --    (grant_callback ran) AND both references are bound (register_reference ran).
---    Safe to call from either callback; CREATE SERVICE IF NOT EXISTS makes it
---    a no-op once started.
+--    Safe to call from either callback, or manually by an operator (granted
+--    below): CREATE SERVICE IF NOT EXISTS makes repeat calls safe, but
+--    start_controller/start_admin_ui also unconditionally re-specify the
+--    service on every call (see their own comments) - a repeat call is safe,
+--    not a no-op, and restarts both services. That's intentional: it's the
+--    only way to pick up a changed image/manifest after an app upgrade, or a
+--    rebound pg_secret/pg_eai reference, without a full reinstall.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE app_public.maybe_start_services()
     RETURNS STRING
@@ -359,6 +364,15 @@ capabilities:
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
 
+    -- CREATE SERVICE IF NOT EXISTS above is a no-op once the service already
+    -- exists, so an ALTER APPLICATION ... UPGRADE would otherwise never refresh
+    -- a running service's env/image when only the manifest or base image
+    -- changes between patches. Re-specifying unconditionally on every
+    -- setup-script run (install AND upgrade) keeps it in sync, at the cost of a
+    -- brief restart on every upgrade even when this spec is unchanged.
+    EXECUTE IMMEDIATE 'ALTER SERVICE ' || db_schema || '.MENDIX_DEPLOY_CONTROLLER' ||
+        ' FROM SPECIFICATION ' || dollar || spec || dollar;
+
     -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is NOT set here: setting it on a service
     -- requires MANAGE SERVICE CALLER ACCESS on the account, which no application
     -- object can hold. It is instead requested via the caller_token_spec app
@@ -448,6 +462,12 @@ capabilities:
            ' FROM SPECIFICATION ' || dollar || spec || dollar ||
            ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
     EXECUTE IMMEDIATE ddl;
+
+    -- Re-specify unconditionally on every setup-script run (install AND
+    -- upgrade) - see start_controller for why CREATE SERVICE IF NOT EXISTS
+    -- alone leaves an already-running service stale across upgrades.
+    EXECUTE IMMEDIATE 'ALTER SERVICE ' || db_schema || '.MENDIX_DEPLOY_ADMIN_UI' ||
+        ' FROM SPECIFICATION ' || dollar || spec || dollar;
 
     -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is requested via the caller_token_spec
     -- app specification and approved by the consumer (see start_controller for
