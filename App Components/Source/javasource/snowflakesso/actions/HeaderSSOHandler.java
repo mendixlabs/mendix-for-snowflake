@@ -6,7 +6,6 @@ import com.mendix.externalinterface.connector.RequestHandler;
 import com.mendix.m2ee.api.IMxRuntimeRequest;
 import com.mendix.m2ee.api.IMxRuntimeResponse;
 import com.mendix.systemwideinterfaces.core.IContext;
-import com.mendix.systemwideinterfaces.core.IMendixIdentifier;
 import com.mendix.systemwideinterfaces.core.IMendixObject;
 import com.mendix.systemwideinterfaces.core.ISession;
 import com.mendix.systemwideinterfaces.core.IUser;
@@ -25,6 +24,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -297,104 +297,126 @@ public class HeaderSSOHandler extends RequestHandler {
 
     /**
      * Syncs the user's Mendix userroles from their Snowflake account roles, per
-     * MX_ROLE_MAPPING. Never throws and never blocks login: any failure just leaves
-     * the user's existing/default role untouched.
+     * MX_ROLE_MAPPING. Never throws and never blocks login: any failure to reach
+     * Snowflake or to read the caller token leaves the user's existing role
+     * untouched. An empty/absent mapping is treated differently from a failure -
+     * it's a deliberate "sync is off" state, so any role a prior sync granted
+     * (tracked via the SnowflakeUser_LastSyncedRoles reference set) is actively
+     * reverted to DEFAULT_USER_ROLE rather than left in place.
      */
     private void syncUserRoles(IContext systemContext, IUser user, String callerToken) {
         Map<String, String> mapping = loadRoleMapping();
-        if (mapping.isEmpty()) {
-            return; // legacy static behavior: no mapping configured
-        }
-        if (callerToken == null || callerToken.isBlank()) {
-            Core.getLogger(LOG_NODE).info(
-                "Role mapping is configured but no caller token is present for "
-                + user.getName() + " (is use_caller_rights enabled?); keeping existing/default role.");
-            return;
-        }
 
-        List<String> availableRoles;
-        try {
-            availableRoles = fetchAvailableRoles(callerToken);
-        } catch (Exception e) {
-            Core.getLogger(LOG_NODE).warn(
-                "Role sync failed for " + user.getName() + " (Snowflake unreachable?); "
-                + "falling back to existing/default role: " + e.getMessage());
-            return;
-        }
-
-        Set<String> availableSet = new HashSet<>(availableRoles);
         Set<String> target = new HashSet<>();
-        for (Map.Entry<String, String> entry : mapping.entrySet()) {
-            if (availableSet.contains(entry.getKey())) {
-                target.add(entry.getValue());
+        if (mapping.isEmpty()) {
+            target.add(DEFAULT_USER_ROLE);
+        } else {
+            if (callerToken == null || callerToken.isBlank()) {
+                Core.getLogger(LOG_NODE).info(
+                    "Role mapping is configured but no caller token is present for "
+                    + user.getName() + " (is use_caller_rights enabled?); keeping existing/default role.");
+                return;
+            }
+
+            List<String> availableRoles;
+            try {
+                availableRoles = fetchAvailableRoles(callerToken);
+            } catch (Exception e) {
+                Core.getLogger(LOG_NODE).warn(
+                    "Role sync failed for " + user.getName() + " (Snowflake unreachable?); "
+                    + "falling back to existing/default role: " + e.getMessage());
+                return;
+            }
+
+            Set<String> availableSet = new HashSet<>(availableRoles);
+            for (Map.Entry<String, String> entry : mapping.entrySet()) {
+                if (availableSet.contains(entry.getKey())) {
+                    target.add(entry.getValue());
+                }
+            }
+            if (target.isEmpty()) {
+                Core.getLogger(LOG_NODE).info(
+                    "User " + user.getName() + " holds no Snowflake role mapped to a Mendix userrole; "
+                    + "falling back to default role " + DEFAULT_USER_ROLE);
+                target.add(DEFAULT_USER_ROLE);
             }
         }
-        if (target.isEmpty()) {
-            Core.getLogger(LOG_NODE).info(
-                "User " + user.getName() + " holds no Snowflake role mapped to a Mendix userrole; "
-                + "falling back to default role " + DEFAULT_USER_ROLE);
-            target.add(DEFAULT_USER_ROLE);
-        }
-
-        // Managed subset: only roles this mapping (plus the default) is allowed to
-        // touch, so roles granted inside the app but not managed here are never
-        // clobbered.
-        Set<String> managed = new HashSet<>(mapping.values());
-        managed.add(DEFAULT_USER_ROLE);
 
         try {
-            // Load every System.UserRole once (no per-name XPath, no quoting concern -
-            // mapping values with quotes are already rejected by the controller).
-            List<IMendixObject> allRoles = Core.createXPathQuery("//System.UserRole").execute(systemContext);
-            Map<String, IMendixObject> roleByName = new HashMap<>();
-            Map<IMendixIdentifier, String> nameById = new HashMap<>();
-            for (IMendixObject roleObj : allRoles) {
-                String name = (String) roleObj.getValue(systemContext, "Name");
-                if (name != null) {
-                    roleByName.put(name, roleObj);
-                    nameById.put(roleObj.getId(), name);
-                }
+            snowflakesso.proxies.SnowflakeUser sfUser =
+                snowflakesso.proxies.SnowflakeUser.initialize(systemContext, user.getMendixObject());
+
+            Map<String, system.proxies.UserRole> roleByName = new HashMap<>();
+            for (system.proxies.UserRole role : system.proxies.UserRole.load(systemContext, "")) {
+                roleByName.put(role.getName(systemContext), role);
             }
 
-            IMendixObject userObj = user.getMendixObject();
-            MendixObjectReferenceSet userRolesMember =
-                (MendixObjectReferenceSet) userObj.getMember("System.UserRoles");
-            List<IMendixIdentifier> currentIds = userRolesMember.getValue(systemContext);
-
-            Set<String> currentNames = new HashSet<>();
-            boolean changed = false;
-            for (IMendixIdentifier id : currentIds) {
-                String name = nameById.get(id);
-                if (name == null) {
-                    continue;
-                }
-                currentNames.add(name);
-                if (managed.contains(name) && !target.contains(name)) {
-                    userRolesMember.removeValue(systemContext, id);
-                    changed = true;
-                }
-            }
-
+            // Resolve every target role name once, up front, so a role that no
+            // longer exists is warned about exactly once rather than at each of
+            // its two use sites below.
+            Map<String, system.proxies.UserRole> targetResolved = new HashMap<>();
             for (String roleName : target) {
-                if (currentNames.contains(roleName)) {
-                    continue;
-                }
-                IMendixObject roleObj = roleByName.get(roleName);
+                system.proxies.UserRole roleObj = roleByName.get(roleName);
                 if (roleObj == null) {
                     Core.getLogger(LOG_NODE).warn(
                         "Role mapping targets Mendix userrole '" + roleName + "' which does not exist; skipping.");
                     continue;
                 }
-                userRolesMember.addValue(systemContext, roleObj.getId());
-                changed = true;
+                targetResolved.put(roleName, roleObj);
             }
 
-            if (changed) {
-                Core.commit(systemContext, userObj);
+            List<system.proxies.UserRole> currentRoles = sfUser.getUserRoles(systemContext);
+            List<system.proxies.UserRole> lastSyncedRoles = sfUser.getSnowflakeUser_LastSyncedRoles(systemContext);
+
+            Set<String> currentNames = new HashSet<>();
+            for (system.proxies.UserRole role : currentRoles) {
+                currentNames.add(role.getName(systemContext));
             }
+            Set<String> lastSyncedNames = new HashSet<>();
+            for (system.proxies.UserRole role : lastSyncedRoles) {
+                lastSyncedNames.add(role.getName(systemContext));
+            }
+
+            // Managed subset: roles the CURRENT mapping targets, plus roles a PRIOR
+            // sync granted, plus the default. Including the prior-sync set is what
+            // lets a role be reverted after its mapping entry (or the whole mapping)
+            // is removed, while a role granted manually inside the app - never
+            // reflected in either set - is left untouched.
+            Set<String> managed = new HashSet<>(mapping.values());
+            managed.addAll(lastSyncedNames);
+            managed.add(DEFAULT_USER_ROLE);
+
+            List<system.proxies.UserRole> newUserRoles = new ArrayList<>();
+            Set<String> newNames = new HashSet<>();
+            for (system.proxies.UserRole role : currentRoles) {
+                String name = role.getName(systemContext);
+                if (!managed.contains(name)) {
+                    newUserRoles.add(role);
+                    newNames.add(name);
+                }
+            }
+            for (Map.Entry<String, system.proxies.UserRole> entry : targetResolved.entrySet()) {
+                if (newNames.add(entry.getKey())) {
+                    newUserRoles.add(entry.getValue());
+                }
+            }
+
+            boolean userRolesChanged = !newNames.equals(currentNames);
+            boolean lastSyncedChanged = !targetResolved.keySet().equals(lastSyncedNames);
+
+            if (userRolesChanged) {
+                sfUser.setUserRoles(systemContext, newUserRoles);
+            }
+            if (lastSyncedChanged) {
+                sfUser.setSnowflakeUser_LastSyncedRoles(systemContext, new ArrayList<>(targetResolved.values()));
+            }
+            if (userRolesChanged || lastSyncedChanged) {
+                Core.commit(systemContext, sfUser.getMendixObject());
+            }
+
             Core.getLogger(LOG_NODE).info(
                 "Role sync succeeded for " + user.getName() + "; userroles: " + target
-                + (changed ? " (updated)" : " (unchanged)"));
+                + (userRolesChanged ? " (updated)" : " (unchanged)"));
         } catch (CoreException e) {
             Core.getLogger(LOG_NODE).warn(
                 "Role sync failed to apply for " + user.getName() + "; "
