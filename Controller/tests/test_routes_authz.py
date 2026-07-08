@@ -122,6 +122,14 @@ class TestSystemAuthz:
         resp = client.get("/system/compute-pool", headers=role_headers("PRIV_ROLE"))
         assert resp.status_code == 200
 
+    def test_pg_info_get_non_privileged_403(self, client, role_headers):
+        resp = client.get("/system/pg-info", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 403
+
+    def test_pg_info_get_privileged_200(self, client, fake_sf, role_headers):
+        resp = client.get("/system/pg-info", headers=role_headers("PRIV_ROLE"))
+        assert resp.status_code == 200
+
 
 class TestActivityAuthz:
     def test_privileged_sees_all_rows(self, client, fake_activity, role_headers):

@@ -41,6 +41,13 @@ class TestGetComputePool:
         assert resp.json() == fake_sf.compute_pool
 
 
+class TestGetPgInfo:
+    def test_returns_host_and_port(self, client, fake_sf, role_headers):
+        resp = client.get("/system/pg-info", headers=role_headers("PRIV_ROLE"))
+        assert resp.status_code == 200
+        assert resp.json() == {"host": "pg.test.local", "port": "5432"}
+
+
 class TestUpdateComputePool:
     def test_all_none_body_400(self, client, fake_sf, role_headers):
         resp = client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"), json={})

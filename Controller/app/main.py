@@ -539,6 +539,15 @@ def get_compute_pool(roles: set[str] = Depends(caller_roles)):
     return pool
 
 
+@app.get("/system/pg-info")
+def get_pg_info(roles: set[str] = Depends(caller_roles)):
+    if not (roles & auth.PRIVILEGED_ROLES):
+        raise HTTPException(status_code=403, detail="Restricted to privileged roles")
+    host_port = _pg_host()
+    host, _, port = host_port.rpartition(":")
+    return {"host": host or host_port, "port": port or None}
+
+
 @app.patch("/system/compute-pool")
 def update_compute_pool(req: UpdateComputePoolRequest, roles: set[str] = Depends(caller_roles)):
     if not (roles & auth.PRIVILEGED_ROLES):

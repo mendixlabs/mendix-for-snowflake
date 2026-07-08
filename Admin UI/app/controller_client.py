@@ -137,6 +137,9 @@ class ControllerClient:
     def get_compute_pool(self) -> dict:
         return self._request("GET", "/system/compute-pool").json()
 
+    def get_pg_info(self) -> dict:
+        return self._request("GET", "/system/pg-info").json()
+
     def update_compute_pool(
         self,
         *,

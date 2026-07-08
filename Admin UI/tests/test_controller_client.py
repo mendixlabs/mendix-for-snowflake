@@ -302,6 +302,13 @@ class TestEndpointSmokeTests:
         client.get_compute_pool()
         assert handler.requests[0].url.path == "/system/compute-pool"
 
+    def test_get_pg_info(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"host": "pg.internal", "port": "5432"}))
+        client = mock_controller(handler)
+        result = client.get_pg_info()
+        assert handler.requests[0].url.path == "/system/pg-info"
+        assert result == {"host": "pg.internal", "port": "5432"}
+
     def test_update_compute_pool_omits_none_fields(self, mock_controller, recording_handler):
         handler = recording_handler(_ok({"name": "TEST_POOL"}))
         client = mock_controller(handler)

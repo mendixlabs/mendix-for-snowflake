@@ -17,11 +17,19 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
+from auth import client
 from branding import apply_branding
+from controller_client import ControllerError
 from setup_checks import render_verify_sql
 
 st.set_page_config(page_title="Setup / Verify", layout="wide")
 apply_branding()
+
+try:
+    _pg_info = client().get_pg_info()
+except ControllerError:
+    # Not up yet, or this operator isn't privileged - fall back to the placeholder.
+    _pg_info = {}
 st.title("Setup / Verify")
 st.caption(
     "One-time prerequisites the app cannot create for itself, and a check that "
@@ -37,12 +45,14 @@ with st.expander("Names and values", expanded=True):
     with c1:
         app_name = st.text_input("Application object", value="MENDIX_SPCS_APP")
         instance = st.text_input("Postgres instance", value="MENDIX_PG")
-        pg_host = st.text_input("Postgres host", value="<pg-host>",
-                                help="From the CREATE POSTGRES INSTANCE output. Shown once.")
+        pg_host = st.text_input("Postgres host", value=_pg_info.get("host") or "<pg-host>",
+                                help="From the CREATE POSTGRES INSTANCE output. Shown once. "
+                                     "Prefilled from the controller's bound pg_secret once "
+                                     "the app is up.")
     with c2:
         eai = st.text_input("Egress EAI", value="MENDIX_PG_EAI")
         net_policy = st.text_input("PG network policy", value="MENDIX_PG_POLICY")
-        pg_port = st.text_input("Postgres port", value="5432")
+        pg_port = st.text_input("Postgres port", value=_pg_info.get("port") or "5432")
     with c3:
         secret_db = st.text_input("Secret database", value="<YOUR_DB>",
                                   help="Consumer database that holds the bound secret.")
