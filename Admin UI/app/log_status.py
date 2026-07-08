@@ -14,6 +14,11 @@ from __future__ import annotations
 # PLAN-native-app-packaging.md item O10); warn well below that point.
 LARGE_LINES_THRESHOLD = 500
 
+# SYSTEM$GET_SERVICE_LOGS's numLines argument errors outright above this value
+# ("Invalid `tail lines`... Allowed values are in range [1, 1000]"); it is a hard
+# ceiling, not a performance suggestion like LARGE_LINES_THRESHOLD above.
+LOG_LINES_HARD_CAP = 1000
+
 
 def classify_log_fetch_failure(service_status: str | None, lines: int) -> tuple[str, str]:
     """Map a 502 log-fetch failure to a (severity, message) pair.

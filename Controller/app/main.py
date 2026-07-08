@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -101,6 +103,69 @@ SYSTEM_SERVICES: dict[str, tuple[str, str]] = {
     "controller": (CONTROLLER_SERVICE_NAME, "controller"),
     "admin-ui": (ADMIN_UI_SERVICE_NAME, "streamlit"),
 }
+
+# SYSTEM$GET_SERVICE_LOGS has no offset/pagination argument - every call returns
+# only a tail of the most recent lines, hard-capped by Snowflake at 1000 regardless
+# of the requested value. A background download therefore cannot fetch more history
+# than the live Logs view already could; its value is dodging the SPCS ingress
+# timeout on a request that may be slow for reasons unrelated to line count (see
+# PLAN-native-app-packaging.md O12), plus handing back a saveable file.
+LOG_DOWNLOAD_LINES = 1000
+
+# In-memory job store for background log downloads (see O12). The controller runs
+# as a single uvicorn process/worker (Controller/Dockerfile has no --workers flag),
+# so a plain dict guarded by a lock is sufficient - no external queue needed. Keyed
+# by an unguessable job id; each job also records the app/system key it belongs to
+# so a caller who only has read access to one app can't poll another app's job.
+_log_jobs: dict[str, dict] = {}
+_log_jobs_lock = threading.Lock()
+_LOG_JOB_TTL_SECS = 1800  # prune finished jobs this long after they finish
+
+
+def _prune_log_jobs(now: float) -> None:
+    stale = [
+        job_id for job_id, job in _log_jobs.items()
+        if job["finished_at"] is not None and now - job["finished_at"] > _LOG_JOB_TTL_SECS
+    ]
+    for job_id in stale:
+        del _log_jobs[job_id]
+
+
+def _run_log_download(job_id: str, service_name: str, container: str) -> None:
+    try:
+        logs = sf.get_service_logs(service_name, container=container, lines=LOG_DOWNLOAD_LINES)
+        with _log_jobs_lock:
+            _log_jobs[job_id].update(status="READY", logs=logs, error=None, finished_at=time.time())
+    except Exception as e:
+        logger.exception("Log download failed for %s", service_name)
+        with _log_jobs_lock:
+            _log_jobs[job_id].update(status="FAILED", logs=None, error=str(e), finished_at=time.time())
+
+
+def _start_log_download(job_key: str, service_name: str, container: str,
+                        background_tasks: BackgroundTasks) -> str:
+    job_id = uuid.uuid4().hex
+    with _log_jobs_lock:
+        _prune_log_jobs(time.time())
+        _log_jobs[job_id] = {
+            "job_key": job_key, "status": "PENDING", "logs": None, "error": None, "finished_at": None,
+        }
+    background_tasks.add_task(_run_log_download, job_id, service_name, container)
+    return job_id
+
+
+def _get_log_job(job_id: str, job_key: str) -> dict:
+    """Look up a log-download job, scoped to the caller's app/system key.
+
+    A job's key must match exactly: this is what stops an operator who can only
+    read app A from polling app B's job even if they somehow learned its id.
+    """
+    with _log_jobs_lock:
+        job = _log_jobs.get(job_id)
+    if not job or job["job_key"] != job_key:
+        raise HTTPException(status_code=404, detail="Log download job not found")
+    return job
+
 
 # Derived from the bound pg_secret at startup
 _PG_HOST: str | None = None
@@ -527,6 +592,50 @@ def get_system_logs(target: str, lines: int = 200, roles: set[str] = Depends(cal
         # another service's logs) instead of an opaque 500.
         raise HTTPException(status_code=502, detail=f"Could not read {target} logs: {e}")
     return {"logs": logs}
+
+
+@app.post("/apps/{name}/logs/download", status_code=202)
+def start_log_download(name: str, background_tasks: BackgroundTasks,
+                       roles: set[str] = Depends(caller_roles)):
+    """Fetch up to LOG_DOWNLOAD_LINES lines in the background and return a job id.
+
+    Sidesteps the SPCS ingress timeout on a slow log fetch (see O12); it does not
+    retrieve more history than /apps/{name}/logs already can, since
+    SYSTEM$GET_SERVICE_LOGS has no pagination and is hard-capped at that many lines.
+    """
+    record = _record_for_read(name, roles)
+    job_id = _start_log_download(name.upper(), record.service_name, "mendix-app", background_tasks)
+    return {"job_id": job_id, "status": "PENDING"}
+
+
+@app.get("/apps/{name}/logs/download/{job_id}")
+def get_log_download(name: str, job_id: str, roles: set[str] = Depends(caller_roles)):
+    _record_for_read(name, roles)
+    job = _get_log_job(job_id, name.upper())
+    return {"status": job["status"], "logs": job["logs"], "error": job["error"]}
+
+
+@app.post("/system/logs/{target}/download", status_code=202)
+def start_system_log_download(target: str, background_tasks: BackgroundTasks,
+                              roles: set[str] = Depends(caller_roles)):
+    if not (roles & auth.PRIVILEGED_ROLES):
+        raise HTTPException(status_code=403, detail="System logs are restricted to privileged roles")
+    entry = SYSTEM_SERVICES.get(target)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Unknown system service '{target}'")
+    service_name, container = entry
+    job_id = _start_log_download(f"system:{target}", service_name, container, background_tasks)
+    return {"job_id": job_id, "status": "PENDING"}
+
+
+@app.get("/system/logs/{target}/download/{job_id}")
+def get_system_log_download(target: str, job_id: str, roles: set[str] = Depends(caller_roles)):
+    if not (roles & auth.PRIVILEGED_ROLES):
+        raise HTTPException(status_code=403, detail="System logs are restricted to privileged roles")
+    if target not in SYSTEM_SERVICES:
+        raise HTTPException(status_code=404, detail=f"Unknown system service '{target}'")
+    job = _get_log_job(job_id, f"system:{target}")
+    return {"status": job["status"], "logs": job["logs"], "error": job["error"]}
 
 
 @app.get("/system/compute-pool")

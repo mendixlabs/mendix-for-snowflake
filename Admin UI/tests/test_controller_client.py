@@ -198,6 +198,37 @@ class TestEndpointSmokeTests:
         assert client.get_system_logs("controller") == "sys log"
         assert handler.requests[0].url.path == "/system/logs/controller"
 
+    def test_start_log_download(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"job_id": "abc123", "status": "PENDING"}, status=202))
+        client = mock_controller(handler)
+        result = client.start_log_download("myapp")
+        req = handler.requests[0]
+        assert req.method == "POST"
+        assert req.url.path == "/apps/myapp/logs/download"
+        assert result == {"job_id": "abc123", "status": "PENDING"}
+
+    def test_get_log_download(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "READY", "logs": "log text", "error": None}))
+        client = mock_controller(handler)
+        result = client.get_log_download("myapp", "abc123")
+        assert handler.requests[0].url.path == "/apps/myapp/logs/download/abc123"
+        assert result == {"status": "READY", "logs": "log text", "error": None}
+
+    def test_start_system_log_download(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"job_id": "sys1", "status": "PENDING"}, status=202))
+        client = mock_controller(handler)
+        client.start_system_log_download("controller")
+        req = handler.requests[0]
+        assert req.method == "POST"
+        assert req.url.path == "/system/logs/controller/download"
+
+    def test_get_system_log_download(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "FAILED", "logs": None, "error": "boom"}))
+        client = mock_controller(handler)
+        result = client.get_system_log_download("controller", "sys1")
+        assert handler.requests[0].url.path == "/system/logs/controller/download/sys1"
+        assert result == {"status": "FAILED", "logs": None, "error": "boom"}
+
     def test_close_closes_underlying_client(self, mock_controller, recording_handler):
         handler = recording_handler(_ok([]))
         client = mock_controller(handler)

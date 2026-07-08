@@ -89,6 +89,18 @@ class ControllerClient:
         """Logs for an infrastructure service ('controller' or 'admin-ui'). Privileged only."""
         return self._request("GET", f"/system/logs/{target}", params={"lines": lines}).json().get("logs", "")
 
+    def start_log_download(self, name: str) -> dict:
+        return self._request("POST", f"/apps/{name}/logs/download").json()
+
+    def get_log_download(self, name: str, job_id: str) -> dict:
+        return self._request("GET", f"/apps/{name}/logs/download/{job_id}").json()
+
+    def start_system_log_download(self, target: str) -> dict:
+        return self._request("POST", f"/system/logs/{target}/download").json()
+
+    def get_system_log_download(self, target: str, job_id: str) -> dict:
+        return self._request("GET", f"/system/logs/{target}/download/{job_id}").json()
+
     def trigger_deploy(self, name: str) -> dict:
         return self._request("POST", f"/apps/{name}/trigger-deploy").json()
 

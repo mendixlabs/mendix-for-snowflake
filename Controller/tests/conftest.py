@@ -47,6 +47,7 @@ from app.pad_parser import PadConstant  # noqa: E402
 def _reset_module_state():
     main._PG_HOST = None
     main._PG_PASSWORD = None
+    main._log_jobs.clear()
     snowflake_client._conn = None
     auth._identity_cache.clear()
     yield

@@ -13,7 +13,7 @@ from auth import client, is_privileged_operator
 from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
-from log_status import LARGE_LINES_THRESHOLD, classify_log_fetch_failure
+from log_status import LARGE_LINES_THRESHOLD, LOG_LINES_HARD_CAP, classify_log_fetch_failure
 
 st.set_page_config(page_title="Logs", layout="wide")
 apply_branding()
@@ -45,23 +45,50 @@ selected_label = st.selectbox("Source", labels)
 selected_kind, selected_key = next((s[1], s[2]) for s in sources if s[0] == selected_label)
 selected = selected_label
 
-cols = st.columns([1, 1, 4])
+cols = st.columns([1, 1, 1, 3])
 with cols[0]:
     lines = st.number_input(
         "Lines",
         min_value=10,
-        max_value=2000,
+        max_value=LOG_LINES_HARD_CAP,
         value=200,
         step=50,
         help=(
-            f"Values above {LARGE_LINES_THRESHOLD} can take longer to fetch than the "
-            "request timeout window allows; the app keeps running even if the fetch fails."
+            f"Snowflake rejects values above {LOG_LINES_HARD_CAP} outright. Values above "
+            f"{LARGE_LINES_THRESHOLD} can also take longer to fetch than the request "
+            "timeout window allows; the app keeps running even if the fetch fails."
         ),
     )
     if lines > LARGE_LINES_THRESHOLD:
         st.caption(f"⚠️ {int(lines)} lines may be slow to fetch and time out.")
 with cols[1]:
     auto = st.toggle("Auto-refresh", value=False, help="Refresh every 10 seconds.")
+with cols[2]:
+    st.write("")  # vertical alignment with the widgets in the other columns
+    download_clicked = st.button(
+        "Download logs",
+        help=(
+            "Fetch the most recent log lines in the background and offer them as a "
+            "file once ready. Does not return more history than the live view above "
+            "- Snowflake's log function has no pagination - but it runs as a "
+            "background job so a slow fetch can't time out the request."
+        ),
+    )
+
+_DOWNLOAD_STATE_KEY = f"logs-download-state::{selected}"
+
+if download_clicked:
+    try:
+        resp = (
+            client().start_system_log_download(selected_key)
+            if selected_kind == "system"
+            else client().start_log_download(selected_key)
+        )
+        st.session_state[_DOWNLOAD_STATE_KEY] = {
+            "job_id": resp["job_id"], "status": "PENDING", "logs": None, "error": None,
+        }
+    except ControllerError as e:
+        st.error(f"Failed to start log download: {e}")
 
 _LOG_HEIGHT = 600
 _SCROLL_INIT_KEY = f"logs-scrolled-init::{selected}"
@@ -147,3 +174,43 @@ def _log_view() -> None:
 
 
 _log_view()
+
+
+@st.fragment(run_every=3)
+def _download_status() -> None:
+    state = st.session_state.get(_DOWNLOAD_STATE_KEY)
+    if not state:
+        return
+
+    if state["status"] in ("READY", "FAILED"):
+        # Terminal state is cached in session_state; stop polling the controller
+        # once we have it, even though this fragment keeps ticking every 3s.
+        job = state
+    else:
+        try:
+            job = (
+                client().get_system_log_download(selected_key, state["job_id"])
+                if selected_kind == "system"
+                else client().get_log_download(selected_key, state["job_id"])
+            )
+        except ControllerError as e:
+            st.error(f"Download status check failed: {e}")
+            return
+        job = {**job, "job_id": state["job_id"]}
+        st.session_state[_DOWNLOAD_STATE_KEY] = job
+
+    if job["status"] == "PENDING":
+        st.caption("⏳ Preparing log download...")
+    elif job["status"] == "FAILED":
+        st.error(f"Log download failed: {job.get('error')}")
+    elif job["status"] == "READY":
+        st.download_button(
+            "Save logs to file",
+            data=job.get("logs") or "",
+            file_name=f"{selected_key}-logs.txt",
+            mime="text/plain",
+            key=f"download-btn-{job['job_id']}",
+        )
+
+
+_download_status()
