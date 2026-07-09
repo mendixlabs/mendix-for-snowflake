@@ -32,6 +32,26 @@ class TestListApps:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_status_header_absent_when_statuses_fetch_succeeds(
+        self, client, fake_registry, make_record, role_headers
+    ):
+        _seed(fake_registry, make_record)
+        resp = client.get("/apps", headers=role_headers("OWNER_ROLE"))
+        assert "x-service-status-unavailable" not in resp.headers
+
+    def test_status_header_set_when_statuses_fetch_fails(
+        self, client, fake_registry, make_record, role_headers, fake_sf
+    ):
+        _seed(fake_registry, make_record)
+        fake_sf.raise_on["show_all_service_statuses"] = RuntimeError("boom")
+        resp = client.get("/apps", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 200
+        assert resp.headers["x-service-status-unavailable"] == "true"
+        # The apps themselves still come back - a status-query failure
+        # degrades to unknown statuses, not a hard failure of the whole route.
+        assert len(resp.json()) == 1
+        assert resp.json()[0]["service_status"] is None
+
 
 class TestGetAppAndLogs:
     def test_privileged_reads_ok(self, client, fake_registry, make_record, role_headers):

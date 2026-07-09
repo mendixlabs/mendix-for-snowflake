@@ -79,8 +79,11 @@ def query(app: Optional[str] = None, operator: Optional[str] = None,
         where.append("operator = %s")
         params.append(operator)
     where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+    # nosec B608 - _TABLE is a fixed constant; where's two clauses come only from
+    # this function's own literals (never unvalidated input) and are parameterized
+    # via %s; limit is int()-cast, which raises rather than admitting non-numeric input.
     sql = (
-        f"SELECT id, ts, operator, action, app_name, detail, result "
+        f"SELECT id, ts, operator, action, app_name, detail, result "  # nosec B608
         f"FROM {_TABLE} {where_clause} "
         f"ORDER BY ts DESC LIMIT {int(limit)}"
     )

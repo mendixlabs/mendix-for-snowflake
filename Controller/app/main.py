@@ -3,26 +3,34 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
 import time
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-import yaml
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from . import activity, auth, pg_admin, registry, snowflake_client as sf
+# LOG_DOWNLOAD_LINES, _LOG_JOB_TTL_SECS and _log_jobs aren't referenced by this
+# module's own code (only _get_log_job/_start_log_download are); they're
+# imported anyway so they stay reachable as main.<name>, which the test suite
+# relies on (conftest's per-test job-store reset, log-download TTL/line-cap
+# assertions).
+from .log_jobs import (
+    LOG_DOWNLOAD_LINES,
+    _LOG_JOB_TTL_SECS,
+    _log_jobs,
+    _get_log_job,
+    _start_log_download,
+)
 from .models import (
     AppRecord,
     AppStatusResponse,
     CreateAppRequest,
     HIDDEN_VALUE,
-    RESOURCE_TIERS,
     ResourceTier,
     UpdateComputePoolRequest,
     UpdateConstantsRequest,
@@ -31,6 +39,7 @@ from .models import (
     UpdateSpecRequest,
 )
 from .pad_parser import PadConstant, parse_from_zip, parse_user_roles_from_zip
+from .spec_builder import _build_spec
 
 
 @asynccontextmanager
@@ -103,69 +112,6 @@ SYSTEM_SERVICES: dict[str, tuple[str, str]] = {
     "controller": (CONTROLLER_SERVICE_NAME, "controller"),
     "admin-ui": (ADMIN_UI_SERVICE_NAME, "streamlit"),
 }
-
-# SYSTEM$GET_SERVICE_LOGS has no offset/pagination argument - every call returns
-# only a tail of the most recent lines, hard-capped by Snowflake at 1000 regardless
-# of the requested value. A background download therefore cannot fetch more history
-# than the live Logs view already could; its value is dodging the SPCS ingress
-# timeout on a request that may be slow for reasons unrelated to line count (see
-# PLAN-native-app-packaging.md O12), plus handing back a saveable file.
-LOG_DOWNLOAD_LINES = 1000
-
-# In-memory job store for background log downloads (see O12). The controller runs
-# as a single uvicorn process/worker (Controller/Dockerfile has no --workers flag),
-# so a plain dict guarded by a lock is sufficient - no external queue needed. Keyed
-# by an unguessable job id; each job also records the app/system key it belongs to
-# so a caller who only has read access to one app can't poll another app's job.
-_log_jobs: dict[str, dict] = {}
-_log_jobs_lock = threading.Lock()
-_LOG_JOB_TTL_SECS = 1800  # prune finished jobs this long after they finish
-
-
-def _prune_log_jobs(now: float) -> None:
-    stale = [
-        job_id for job_id, job in _log_jobs.items()
-        if job["finished_at"] is not None and now - job["finished_at"] > _LOG_JOB_TTL_SECS
-    ]
-    for job_id in stale:
-        del _log_jobs[job_id]
-
-
-def _run_log_download(job_id: str, service_name: str, container: str) -> None:
-    try:
-        logs = sf.get_service_logs(service_name, container=container, lines=LOG_DOWNLOAD_LINES)
-        with _log_jobs_lock:
-            _log_jobs[job_id].update(status="READY", logs=logs, error=None, finished_at=time.time())
-    except Exception as e:
-        logger.exception("Log download failed for %s", service_name)
-        with _log_jobs_lock:
-            _log_jobs[job_id].update(status="FAILED", logs=None, error=str(e), finished_at=time.time())
-
-
-def _start_log_download(job_key: str, service_name: str, container: str,
-                        background_tasks: BackgroundTasks) -> str:
-    job_id = uuid.uuid4().hex
-    with _log_jobs_lock:
-        _prune_log_jobs(time.time())
-        _log_jobs[job_id] = {
-            "job_key": job_key, "status": "PENDING", "logs": None, "error": None, "finished_at": None,
-        }
-    background_tasks.add_task(_run_log_download, job_id, service_name, container)
-    return job_id
-
-
-def _get_log_job(job_id: str, job_key: str) -> dict:
-    """Look up a log-download job, scoped to the caller's app/system key.
-
-    A job's key must match exactly: this is what stops an operator who can only
-    read app A from polling app B's job even if they somehow learned its id.
-    """
-    with _log_jobs_lock:
-        job = _log_jobs.get(job_id)
-    if not job or job["job_key"] != job_key:
-        raise HTTPException(status_code=404, detail="Log download job not found")
-    return job
-
 
 # Derived from the bound pg_secret at startup
 _PG_HOST: str | None = None
@@ -245,111 +191,6 @@ def _pg_username(app_name: str) -> str:
 
 def _const_secret_name(const_name: str) -> str:
     return "MX_CONST_" + const_name.replace(".", "_").upper()
-
-
-def _build_spec(
-    app_name: str,
-    app_schema: str,
-    pg_database: str,
-    resource_tier: ResourceTier,
-    constants: list[PadConstant],
-    use_caller_rights: bool,
-    license_id: str | None = None,
-    role_mapping: dict[str, str] | None = None,
-    pad_relative_path: str | None = None,
-) -> str:
-    res = RESOURCE_TIERS[resource_tier]
-    pg_host_port = _pg_host()
-    image_path = MENDIX_BASE_IMAGE
-    # Falls back to the placeholder name at first registration, before any PAD has
-    # been staged/resolved. Every later rebuild must pass the actual resolved path -
-    # the container's entrypoint has no fallback logic of its own, so PAD_STAGE_PATH
-    # must exactly match whatever filename was really staged (see _resolve_staged_pad).
-    pad_path = f"{DEPLOY_STAGE_MOUNT}/{pad_relative_path or f'apps/{app_name}/current.zip'}"
-
-    secret_entries = [
-        {
-            "snowflakeSecret": _secret_fqn(app_schema, "PG_PASS"),
-            "directoryPath": "/secrets/pg_pass",
-        },
-        {
-            "snowflakeSecret": _secret_fqn(app_schema, "ADMIN_PASS"),
-            "directoryPath": "/secrets/admin_pass",
-        },
-    ]
-    for c in constants:
-        secret_entries.append({
-            "snowflakeSecret": _secret_fqn(app_schema, c.secret_name),
-            "directoryPath": f"/secrets/{c.secret_name.lower()}",
-        })
-
-    env = {
-        "PAD_STAGE_PATH": pad_path,
-        "RUNTIME_PARAMS_DATABASETYPE": "POSTGRESQL",
-        "RUNTIME_PARAMS_DATABASEHOST": pg_host_port,
-        "RUNTIME_PARAMS_DATABASENAME": pg_database,
-        "RUNTIME_PARAMS_DATABASEUSERNAME": _pg_username(app_name),
-        "RUNTIME_PARAMS_DATABASEUSESSL": "true",
-        "RUNTIME_PARAMS_COM_MENDIX_CORE_STORAGESERVICE": "com.mendix.storage.localfilesystem",
-        "RUNTIME_PARAMS_UPLOADEDFILESPATH": "/mnt/filestorage",
-    }
-    if license_id:
-        # The License ID is an identifier, not a credential - it goes in as a plain,
-        # operator-visible env var. The License Key is a credential and never appears
-        # here; it reaches the container only via the MX_LICENSE_KEY secret mount below.
-        env["RUNTIME_LICENSE_ID"] = license_id
-        secret_entries.append({
-            "snowflakeSecret": _secret_fqn(app_schema, "MX_LICENSE_KEY"),
-            "directoryPath": "/secrets/mx_license_key",
-        })
-    if role_mapping:
-        # Not a secret: operator-visible mapping of Snowflake account roles to Mendix
-        # userroles, consumed by the SnowflakeSSO module at login. Compact and sorted
-        # so the spec is deterministic.
-        env["MX_ROLE_MAPPING"] = json.dumps(role_mapping, separators=(",", ":"), sort_keys=True)
-
-    spec: dict = {
-        "spec": {
-            "containers": [{
-                "name": "mendix-app",
-                "image": image_path,
-                "env": env,
-                "secrets": secret_entries,
-                "readinessProbe": {"port": 8080, "path": "/"},
-                "resources": {
-                    "requests": {"memory": res["mem_request"], "cpu": res["cpu_request"]},
-                    "limits":   {"memory": res["mem_limit"],   "cpu": res["cpu_limit"]},
-                },
-                "volumeMounts": [
-                    {"name": "filestorage",   "mountPath": "/mnt/filestorage"},
-                    {"name": "deploy-stage",  "mountPath": DEPLOY_STAGE_MOUNT},
-                ],
-            }],
-            "volumes": [
-                {
-                    "name": "filestorage",
-                    "source": "stage",
-                    "stageConfig": {"name": f"@{_filestorage_stage(app_schema)}"},
-                    # mendix-base runs as the non-root mendixuser (uid/gid 999, set in its
-                    # Dockerfile); without this the stage mount is root-owned and
-                    # RUNTIME_PARAMS_UPLOADEDFILESPATH is not writable by the container.
-                    "uid": 999,
-                    "gid": 999,
-                },
-                {
-                    "name": "deploy-stage",
-                    "source": "stage",
-                    "stageConfig": {"name": DEPLOY_STAGE},
-                },
-            ],
-            "endpoints": [{"name": "mendix-web", "port": 8080, "public": True}],
-        }
-    }
-
-    if use_caller_rights:
-        spec["capabilities"] = {"securityContext": {"executeAsCaller": True}}
-
-    return yaml.dump(spec, default_flow_style=False, sort_keys=False)
 
 
 def _poll_status(service_name: str, target: str, timeout_secs: int = 300) -> bool:
@@ -484,9 +325,15 @@ def _effective_endpoint(record: AppRecord, svc_status: str | None) -> str | None
 
 
 @app.get("/apps")
-def list_apps(roles: set[str] = Depends(caller_roles)):
+def list_apps(response: Response, roles: set[str] = Depends(caller_roles)):
     apps = registry.list_apps()
-    statuses = sf.show_all_service_statuses()
+    try:
+        statuses = sf.show_all_service_statuses(strict=True)
+    except Exception:
+        # Distinguishes "the statuses query failed" from "there are genuinely no
+        # services" - both otherwise look identical ({}) to every app row below.
+        statuses = {}
+        response.headers["X-Service-Status-Unavailable"] = "true"
     result = []
     for a in apps:
         if not auth.authorize(a.owner_role, roles):
@@ -831,11 +678,45 @@ def _stamp_deploy_success(name: str, service_name: str, extra: dict | None = Non
     registry.update_app(name, update)
 
 
+def _run_lifecycle_task(
+    name: str,
+    service_name: str,
+    action_fn: Callable[[], None],
+    *,
+    target_status: str,
+    timeout_secs: int,
+    on_success: Callable[[], None],
+    error_message: str,
+) -> None:
+    """Shared skeleton for every background service-restart task (deploy,
+    constants/spec/license/role-mapping update, suspend, resume): run
+    action_fn (rebuild+apply a spec, or suspend/resume the service), poll
+    until the service reaches target_status, then on_success. A poll timeout
+    marks the app FAILED (silently, matching the original per-route
+    behavior). Any exception - including one raised by action_fn or
+    on_success - marks the app FAILED and logs via
+    logger.exception(error_message, name)."""
+    try:
+        action_fn()
+        if not _poll_status(service_name, target_status, timeout_secs=timeout_secs):
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+            return
+        on_success()
+    except Exception:
+        try:
+            registry.update_app(name, {"last_deploy_status": "FAILED"})
+        except Exception:
+            pass
+        logger.exception(error_message, name)
+
+
 def _run_deploy(name: str, pad_path: str, record: AppRecord,
                 pad_constants: list[PadConstant], new_constants: dict,
                 user_roles: list[str]) -> None:
     """Background deploy task. registry status must be set to DEPLOYING before calling."""
-    try:
+    holder: dict = {}
+
+    def action() -> None:
         stored = record.constants or {}
         constants_changed = any(
             new_constants.get(c.name) != stored.get(c.name)
@@ -855,26 +736,21 @@ def _run_deploy(name: str, pad_path: str, record: AppRecord,
         # Normalized to forward slashes: the path lands in a Linux container's env
         # var regardless of the OS the Controller (or its test suite) runs on.
         pad_relative_path = os.path.relpath(pad_path, DEPLOY_STAGE_MOUNT).replace(os.sep, "/")
+        holder["pad_relative_path"] = pad_relative_path
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
                            _constants_from_dict(new_constants), record.use_caller_rights, record.license_id,
                            record.role_mapping, pad_relative_path)
         sf.alter_service_spec(record.service_name, spec)
 
-        if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
-
+    def on_success() -> None:
         _stamp_deploy_success(name, record.service_name, {
             "constants": new_constants,
-            "pad_stage_path": pad_relative_path,
+            "pad_stage_path": holder["pad_relative_path"],
             "user_roles": user_roles,
         })
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Deploy failed for %s", name)
+
+    _run_lifecycle_task(name, record.service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="Deploy failed for %s")
 
 
 def _resolve_staged_pad(name: str) -> str | None:
@@ -927,21 +803,18 @@ def _run_update_constants(name: str, service_name: str, merged: dict,
     # secrets are already written by the endpoint handler, so a failed restart must
     # not discard the registry copy (otherwise the UI shows constants as {}).
     registry.update_app(name, {"constants": merged})
-    try:
+
+    def action() -> None:
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
                            constants, record.use_caller_rights, record.license_id, record.role_mapping,
                            record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
-        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+
+    def on_success() -> None:
         _stamp_deploy_success(name, service_name)
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Constants update failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="Constants update failed for %s")
 
 
 @app.put("/apps/{name}/constants", status_code=202)
@@ -979,25 +852,21 @@ def update_constants(name: str, req: UpdateConstantsRequest, background_tasks: B
 
 def _run_update_spec(name: str, record: AppRecord, new_tier: ResourceTier,
                      new_caller: bool) -> None:
-    try:
+    def action() -> None:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, new_tier, constants_list, new_caller,
                            record.license_id, record.role_mapping, record.pad_stage_path)
         sf.alter_service_spec(record.service_name, spec)
-        if not _poll_status(record.service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+
+    def on_success() -> None:
         registry.update_app(name, {
             "resource_tier": str(new_tier.value) if hasattr(new_tier, "value") else str(new_tier),
             "use_caller_rights": new_caller,
             "last_deploy_status": "READY",
         })
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Spec update failed for %s", name)
+
+    _run_lifecycle_task(name, record.service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="Spec update failed for %s")
 
 
 @app.put("/apps/{name}/spec", status_code=202)
@@ -1024,22 +893,19 @@ def _run_update_license(name: str, service_name: str, record: AppRecord, license
     the endpoint handler; this restarts the service so the runtime picks it up (it
     only checks the license at startup) and persists the id."""
     registry.update_app(name, {"license_id": license_id})
-    try:
+
+    def action() -> None:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
                            constants_list, record.use_caller_rights, license_id, record.role_mapping,
                            record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
-        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+
+    def on_success() -> None:
         _stamp_deploy_success(name, service_name)
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("License update failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="License update failed for %s")
 
 
 @app.put("/apps/{name}/license", status_code=202)
@@ -1059,23 +925,20 @@ def _run_delete_license(name: str, service_name: str, record: AppRecord) -> None
     """Background task for license removal: revert to trial and restart, then drop
     the now-unused secret once the restart has actually happened."""
     registry.update_app(name, {"license_id": None})
-    try:
+
+    def action() -> None:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database, ResourceTier(record.resource_tier),
                            constants_list, record.use_caller_rights, None, record.role_mapping,
                            record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
-        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+
+    def on_success() -> None:
         _stamp_deploy_success(name, service_name)
         sf.drop_secret(_secret_fqn(record.app_schema, "MX_LICENSE_KEY"))
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("License removal failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="License removal failed for %s")
 
 
 @app.delete("/apps/{name}/license", status_code=202)
@@ -1093,23 +956,20 @@ def _run_update_role_mapping(name: str, service_name: str, record: AppRecord,
     """Persist up front (same ordering as license_id), rebuild the spec with
     MX_ROLE_MAPPING, restart so the SSO handler sees it at next login."""
     registry.update_app(name, {"role_mapping": role_mapping})
-    try:
+
+    def action() -> None:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database,
                            ResourceTier(record.resource_tier), constants_list,
                            record.use_caller_rights, record.license_id, role_mapping,
                            record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
-        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+
+    def on_success() -> None:
         _stamp_deploy_success(name, service_name)
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Role mapping update failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="Role mapping update failed for %s")
 
 
 @app.put("/apps/{name}/role-mapping", status_code=202)
@@ -1142,23 +1002,20 @@ def _run_delete_role_mapping(name: str, service_name: str, record: AppRecord) ->
     """Background task for role-mapping removal: no secret to drop, so this is simpler
     than _run_delete_license."""
     registry.update_app(name, {"role_mapping": None})
-    try:
+
+    def action() -> None:
         constants_list = _constants_from_dict(record.constants or {})
         spec = _build_spec(name, record.app_schema, record.pg_database,
                            ResourceTier(record.resource_tier), constants_list,
                            record.use_caller_rights, record.license_id, None,
                            record.pad_stage_path)
         sf.alter_service_spec(service_name, spec)
-        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+
+    def on_success() -> None:
         _stamp_deploy_success(name, service_name)
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Role mapping removal failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, action, target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="Role mapping removal failed for %s")
 
 
 @app.delete("/apps/{name}/role-mapping", status_code=202)
@@ -1184,33 +1041,21 @@ def list_activity(app: Optional[str] = None, operator: Optional[str] = None, lim
 
 
 def _run_suspend(name: str, service_name: str) -> None:
-    try:
-        sf.suspend_service(service_name)
-        if not _poll_status(service_name, "SUSPENDED", timeout_secs=120):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+    def on_success() -> None:
         registry.update_app(name, {"last_deploy_status": "SUSPENDED"})
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Suspend failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, lambda: sf.suspend_service(service_name),
+                        target_status="SUSPENDED", timeout_secs=120,
+                        on_success=on_success, error_message="Suspend failed for %s")
 
 
 def _run_resume(name: str, service_name: str) -> None:
-    try:
-        sf.resume_service(service_name)
-        if not _poll_status(service_name, "RUNNING", timeout_secs=300):
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-            return
+    def on_success() -> None:
         registry.update_app(name, {"last_deploy_status": "READY"})
-    except Exception:
-        try:
-            registry.update_app(name, {"last_deploy_status": "FAILED"})
-        except Exception:
-            pass
-        logger.exception("Resume failed for %s", name)
+
+    _run_lifecycle_task(name, service_name, lambda: sf.resume_service(service_name),
+                        target_status="RUNNING", timeout_secs=300,
+                        on_success=on_success, error_message="Resume failed for %s")
 
 
 @app.post("/apps/{name}/suspend", status_code=202)

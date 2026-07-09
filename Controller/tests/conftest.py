@@ -162,8 +162,8 @@ class FakeSF:
             return val
         return self.service_statuses.get(name, "RUNNING")
 
-    def show_all_service_statuses(self):
-        self._record("show_all_service_statuses", (), {})
+    def show_all_service_statuses(self, *, strict: bool = False):
+        self._record("show_all_service_statuses", (), {"strict": strict})
         return dict(self.service_statuses)
 
     def get_service_endpoint(self, name):

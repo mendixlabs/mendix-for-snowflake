@@ -238,13 +238,20 @@ def show_service_status(name: str) -> str | None:
     return None
 
 
-def show_all_service_statuses() -> dict[str, str]:
-    """Return {SERVICE_NAME: status} for all services in the schema, in one query."""
+def show_all_service_statuses(*, strict: bool = False) -> dict[str, str]:
+    """Return {SERVICE_NAME: status} for all services in the schema, in one query.
+
+    strict=True re-raises instead of swallowing, so a caller that needs to tell
+    "the query failed" apart from "there are genuinely no services" (both
+    otherwise look like {}) can catch it and signal that distinction onward.
+    """
     try:
         rows = execute_sql(f"SHOW SERVICES IN SCHEMA {_DB_SCHEMA}")
         return {row["name"]: row.get("status") for row in rows}
     except Exception:
         logger.warning("show_all_service_statuses failed for schema %s", _DB_SCHEMA, exc_info=True)
+        if strict:
+            raise
         return {}
 
 

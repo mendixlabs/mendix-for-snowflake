@@ -76,14 +76,14 @@ def get_app(name: str) -> Optional[AppRecord]:
     # Case-insensitive: the name feeds case-insensitive Snowflake identifiers
     # (MXAPP_<NAME> schema, <NAME>_SERVICE), so "myapp" and "MyApp" are the
     # same app. Registration relies on this for its duplicate check.
-    rows = sf.execute_sql(f"SELECT * FROM {_TABLE} WHERE UPPER(name) = UPPER(%s)", (name,))
+    rows = sf.execute_sql(f"SELECT * FROM {_TABLE} WHERE UPPER(name) = UPPER(%s)", (name,))  # nosec B608 - _TABLE is a fixed constant, name is parameterized
     if not rows:
         return None
     return _row_to_record(rows[0])
 
 
 def list_apps() -> list[AppRecord]:
-    rows = sf.execute_sql(f"SELECT * FROM {_TABLE} ORDER BY created_at")
+    rows = sf.execute_sql(f"SELECT * FROM {_TABLE} ORDER BY created_at")  # nosec B608 - _TABLE is a fixed constant, no user input in this query
     return [_row_to_record(r) for r in rows]
 
 
@@ -118,11 +118,13 @@ def update_app(name: str, fields: dict[str, Any]) -> None:
             set_clauses.append(f"{key} = %s")
             values.append(val)
     values.append(name)
+    # set_clauses' column names come only from _ALLOWED_UPDATE_COLUMNS (checked
+    # above), never from unvalidated input; every value is still parameterized via %s.
     sf.execute_sql(
-        f"UPDATE {_TABLE} SET {', '.join(set_clauses)} WHERE UPPER(name) = UPPER(%s)",
+        f"UPDATE {_TABLE} SET {', '.join(set_clauses)} WHERE UPPER(name) = UPPER(%s)",  # nosec B608
         tuple(values),
     )
 
 
 def delete_app(name: str) -> None:
-    sf.execute_sql(f"DELETE FROM {_TABLE} WHERE UPPER(name) = UPPER(%s)", (name,))
+    sf.execute_sql(f"DELETE FROM {_TABLE} WHERE UPPER(name) = UPPER(%s)", (name,))  # nosec B608 - _TABLE is a fixed constant, name is parameterized
