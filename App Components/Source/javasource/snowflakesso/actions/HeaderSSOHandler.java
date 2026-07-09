@@ -137,10 +137,17 @@ public class HeaderSSOHandler extends RequestHandler {
         String cont = httpReq.getParameter("cont");
         String redirectUrl = "/index.html";
         if (cont != null && !cont.isBlank()) {
-            redirectUrl = URLDecoder.decode(cont, StandardCharsets.UTF_8);
-            // Safety: only allow relative redirects
-            if (redirectUrl.startsWith("http") || redirectUrl.startsWith("//")) {
-                redirectUrl = "/index.html";
+            String decodedCont = URLDecoder.decode(cont, StandardCharsets.UTF_8);
+            // Safety: allow-list only. A prior deny-list here (rejecting only
+            // startsWith("http")/startsWith("//")) was bypassable via case variants
+            // (HTTP://evil.com), backslash forms (/\evil.com), and leading
+            // whitespace/control characters. Only accept a value that is
+            // unambiguously a same-origin path: exactly one leading '/', a second
+            // character that isn't '/' or '\' (both of which browsers resolve as a
+            // scheme-relative absolute URL), and no backslash or control character
+            // anywhere in the value.
+            if (isSafeRedirectPath(decodedCont)) {
+                redirectUrl = decodedCont;
             }
         }
 
@@ -149,6 +156,33 @@ public class HeaderSSOHandler extends RequestHandler {
 
         Core.getLogger(LOG_NODE).debug(
             "Session created for " + snowflakeUsername + ", redirecting to " + redirectUrl);
+    }
+
+    /**
+     * Allow-list check for the "cont" redirect target: true only for a value that is
+     * unambiguously a same-origin relative path, never something a browser could
+     * resolve as an absolute or scheme-relative URL.
+     */
+    private static boolean isSafeRedirectPath(String path) {
+        if (path.length() < 2 || path.charAt(0) != '/') {
+            return false;
+        }
+        char second = path.charAt(1);
+        if (second == '/' || second == '\\') {
+            return false;
+        }
+        // Reject a backslash (browsers treat it as '/') or any control character
+        // (leading control chars are stripped before URL parsing, so " \t//evil"
+        // could resolve scheme-relative). A leading single '/' with a non-slash
+        // second char is already an unambiguous same-origin path, so no scheme
+        // check is needed and legitimate paths like "/httpservice" stay allowed.
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c == '\\' || c < 0x20 || c == 0x7f) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

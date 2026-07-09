@@ -27,8 +27,18 @@ These are account-level objects the app cannot create for itself. The admin UI's
 1. Create the Snowflake-managed Postgres instance and its network policy.
 2. Create the external access integration (+ network rule) for Postgres egress,
    then bind it as `pg_eai`.
-3. Create the Postgres application user and grant `CREATEDB`.
+3. Create the Postgres application user and grant `CREATEDB` and `CREATEROLE`
+   (the controller uses this account to provision a per-app role and database
+   for each Mendix app you register).
 4. Create the secret with the Postgres credentials, then bind it as `pg_secret`.
+
+## Per-app Postgres isolation
+
+Each Mendix app gets its own Postgres role and password, scoped to only that
+app's own database. The controller creates both when you register the app.
+Every app container connects as its own per-app role - never as the shared
+`application` bootstrap credential above, which the controller holds and
+never mounts into an app container.
 
 ## Required Snowflake role
 

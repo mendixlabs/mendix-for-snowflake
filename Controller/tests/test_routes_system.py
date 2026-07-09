@@ -68,3 +68,11 @@ class TestUpdateComputePool:
                             json={"min_nodes": 99})
         assert resp.status_code == 422
         assert fake_sf.calls_for("alter_compute_pool") == []
+
+    def test_alter_failure_returns_502(self, client, fake_sf, role_headers):
+        # T2: a Snowflake failure during the alter surfaces as 502, not a raw 500.
+        fake_sf.raise_on["alter_compute_pool"] = RuntimeError("pool busy")
+        resp = client.patch("/system/compute-pool", headers=role_headers("PRIV_ROLE"),
+                            json={"min_nodes": 2})
+        assert resp.status_code == 502
+        assert "compute pool" in resp.json()["detail"]

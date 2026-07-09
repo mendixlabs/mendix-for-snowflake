@@ -54,6 +54,15 @@ class TestGetAppAndLogs:
         assert client.get("/apps/ghost", headers=role_headers("PRIV_ROLE")).status_code == 404
         assert client.get("/apps/ghost", headers=role_headers("OWNER_ROLE")).status_code == 404
 
+    def test_get_service_logs_failure_502(self, client, fake_sf, fake_registry, make_record, role_headers):
+        # Mirrors TestSystemLogs.test_get_service_logs_failure_502 in
+        # test_routes_system.py for the per-app sibling endpoint.
+        _seed(fake_registry, make_record)
+        fake_sf.raise_on["get_service_logs"] = RuntimeError("access denied")
+        resp = client.get("/apps/myapp/logs", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 502
+        assert "access denied" in resp.json()["detail"]
+
 
 class TestMutationsAuthz:
     def test_delete_stranger_403(self, client, fake_registry, make_record, role_headers):

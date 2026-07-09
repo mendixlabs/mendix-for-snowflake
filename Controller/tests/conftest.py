@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # .../Controller
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import activity, auth, main, registry, snowflake_client  # noqa: E402
+from app import activity, auth, main, pg_admin, registry, snowflake_client  # noqa: E402
 from app.models import AppRecord, HIDDEN_VALUE  # noqa: E402
 from app.pad_parser import PadConstant  # noqa: E402
 
@@ -236,6 +236,35 @@ def fake_registry(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# fake_pg_admin: records per-app Postgres provisioning/deprovisioning calls
+# ---------------------------------------------------------------------------
+
+class FakePgAdmin:
+    """Records every call main.py makes into pg_admin, with a scriptable
+    provisioned password. Never touches a real Postgres server."""
+
+    def __init__(self):
+        self.provisioned_password = "per-app-generated-pw"
+        self.provision_calls: list[tuple] = []
+        self.deprovision_calls: list[tuple] = []
+
+    def provision_app(self, host_port, bootstrap_password, pg_database, pg_username):
+        self.provision_calls.append((host_port, bootstrap_password, pg_database, pg_username))
+        return self.provisioned_password
+
+    def deprovision_app(self, host_port, bootstrap_password, pg_database, pg_username):
+        self.deprovision_calls.append((host_port, bootstrap_password, pg_database, pg_username))
+
+
+@pytest.fixture
+def fake_pg_admin(monkeypatch):
+    fake = FakePgAdmin()
+    monkeypatch.setattr(pg_admin, "provision_app", fake.provision_app)
+    monkeypatch.setattr(pg_admin, "deprovision_app", fake.deprovision_app)
+    return fake
+
+
+# ---------------------------------------------------------------------------
 # fake_activity
 # ---------------------------------------------------------------------------
 
@@ -276,7 +305,7 @@ def fake_activity(monkeypatch):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def client(fake_sf, fake_registry, fake_activity):
+def client(fake_sf, fake_registry, fake_activity, fake_pg_admin):
     with TestClient(main.app) as c:
         yield c
 

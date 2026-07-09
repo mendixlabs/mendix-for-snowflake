@@ -20,7 +20,7 @@ class TestHealth:
 
 
 class TestCreateAppHappyPath:
-    def test_call_sequence_and_registry_record(self, client, fake_sf, fake_registry, role_headers):
+    def test_call_sequence_and_registry_record(self, client, fake_sf, fake_registry, fake_pg_admin, role_headers):
         resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),
                            json=_create_payload(constants={"Mod.A": "value_a"}))
         assert resp.status_code == 201
@@ -32,16 +32,29 @@ class TestCreateAppHappyPath:
         assert fake_sf.calls_for("create_schema")[0][0] == ("TESTDB.MXAPP_MYAPP",)
         assert fake_sf.calls_for("create_stage")[0][0] == ("TESTDB.MXAPP_MYAPP.FILESTORAGE_STAGE",)
 
+        # The PG_PASS secret now holds the freshly provisioned per-app password,
+        # never the shared bootstrap "application" password.
         secret_calls = {args[0]: args[1] for (args, kw) in fake_sf.calls_for("create_or_replace_secret")}
-        assert secret_calls["TESTDB.MXAPP_MYAPP.PG_PASS"] == "test-pg-password"
+        assert secret_calls["TESTDB.MXAPP_MYAPP.PG_PASS"] == "per-app-generated-pw"
         assert secret_calls["TESTDB.MXAPP_MYAPP.ADMIN_PASS"] == "adminpw123"
         assert secret_calls["TESTDB.MXAPP_MYAPP.MX_CONST_MOD_A"] == "value_a"
+
+        # provision_app was called with this app's own database and its own
+        # dedicated (deterministic) Postgres role name, using the bootstrap
+        # credential read from the controller's pg_secret.
+        assert fake_pg_admin.provision_calls == [
+            ("pg.test.local:5432", "test-pg-password", "myapp_db", main._pg_username("myapp"))
+        ]
 
         create_service_calls = fake_sf.calls_for("create_service")
         assert len(create_service_calls) == 1
         args, kw = create_service_calls[0]
         assert args[0] == "MYAPP_SERVICE"
         assert args[2:] == ("TEST_POOL", "TEST_EAI", "TEST_WH")
+
+        # The spec's DB username matches the same per-app role that was provisioned.
+        spec = yaml.safe_load(args[1])
+        assert spec["spec"]["containers"][0]["env"]["RUNTIME_PARAMS_DATABASEUSERNAME"] == main._pg_username("myapp")
 
         assert fake_sf.calls_for("create_app_access_role")[0][0] == ("myapp",)
         grant_calls = [args for (args, kw) in fake_sf.calls_for("grant_endpoint_to_app_role")]
@@ -82,7 +95,7 @@ class TestCreateAppHappyPath:
         # Mirrors the task's stated approach: monkeypatch _load_pg_credentials
         # directly to return an empty password, rather than going through the
         # env-var/global-cache path exercised above.
-        monkeypatch.setattr(main, "_load_pg_credentials", lambda: ("localhost:5432", ""))
+        monkeypatch.setattr(main, "_load_pg_credentials", lambda force_reload=False: ("localhost:5432", ""))
         resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
         assert resp.status_code == 409
         assert resp.json()["detail"] == "Controller PG credentials not mounted at /secrets/pg"
@@ -146,13 +159,14 @@ class TestGetApp:
 
 
 class TestDeleteApp:
-    def test_happy_path_no_secret_sweep(self, client, fake_sf, fake_registry, make_record, role_headers):
+    def test_happy_path_no_secret_sweep(self, client, fake_sf, fake_registry, fake_pg_admin, make_record, role_headers):
         # Current behavior (schema-per-app model): delete_app no longer sweeps
         # individual secrets by FQN. It suspends (best-effort), drops the
         # service + access role, then drops the app's whole schema (CASCADE),
         # which removes the secrets as a side effect. drop_secret is unused
         # here (it still exists in snowflake_client.py and is unit-tested
-        # separately in test_snowflake_client.py).
+        # separately in test_snowflake_client.py). Delete also releases the
+        # app's own Postgres role and database.
         record = make_record(name="myapp", owner_role="OWNER_ROLE",
                              constants={"Mod.A": HIDDEN_VALUE, "Mod.B": HIDDEN_VALUE})
         fake_registry.add(record)
@@ -163,6 +177,9 @@ class TestDeleteApp:
         assert fake_sf.calls_for("drop_app_access_role") == [(("myapp",), {})]
         assert fake_sf.calls_for("drop_schema_cascade") == [(("TESTDB.MXAPP_MYAPP",), {})]
         assert fake_sf.calls_for("drop_secret") == []
+        assert fake_pg_admin.deprovision_calls == [
+            ("pg.test.local:5432", "test-pg-password", record.pg_database, main._pg_username("myapp"))
+        ]
         assert fake_registry.get_app("myapp") is None
 
     def test_suspend_failure_tolerated(self, client, fake_sf, fake_registry, make_record, role_headers):
@@ -202,3 +219,83 @@ class TestDeleteApp:
         resp = client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 204
         assert fake_registry.get_app("myapp") is None
+
+
+class TestCreateAppRollback:
+    """T1: a mid-sequence create_app failure rolls back every object it made and
+    leaves no registry row, so a partial create never orphans Snowflake objects."""
+
+    def test_failure_after_service_rolls_back_and_no_registry_row(
+        self, client, fake_sf, fake_registry, fake_pg_admin, role_headers
+    ):
+        # Fail on the very last creation step (granting the endpoint), after
+        # schema/stage/secrets/service and the access role already exist.
+        fake_sf.raise_on["grant_endpoint_to_app_role"] = RuntimeError("grant boom")
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 502
+        assert "myapp" in resp.json()["detail"]
+        # Every teardown drop was attempted.
+        assert fake_sf.calls_for("drop_service")
+        assert fake_sf.calls_for("drop_app_access_role")
+        assert fake_sf.calls_for("drop_schema_cascade")
+        # The per-app Postgres role/database provisioned earlier in create_app
+        # is released as part of the rollback.
+        assert fake_pg_admin.deprovision_calls == [
+            ("pg.test.local:5432", "test-pg-password", "myapp_db", main._pg_username("myapp"))
+        ]
+        # No registry row survives a failed create (contrast delete_app).
+        assert fake_registry.get_app("myapp") is None
+
+    def test_failure_on_create_service_still_rolls_back(
+        self, client, fake_sf, fake_registry, role_headers
+    ):
+        fake_sf.raise_on["create_service"] = RuntimeError("service boom")
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 502
+        assert fake_sf.calls_for("drop_schema_cascade")
+        assert fake_registry.get_app("myapp") is None
+
+    def test_rollback_failure_is_reported_in_detail(
+        self, client, fake_sf, fake_registry, role_headers
+    ):
+        # Original failure plus a teardown step that also fails: the detail names
+        # the failed rollback step so an operator knows manual cleanup is needed.
+        fake_sf.raise_on["create_service"] = RuntimeError("service boom")
+        fake_sf.raise_on["drop_schema_cascade"] = RuntimeError("drop boom")
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 502
+        assert "drop schema" in resp.json()["detail"]
+        assert fake_registry.get_app("myapp") is None
+
+    def test_missing_pg_password_rolls_back_schema_and_stage(
+        self, client, fake_sf, fake_registry, role_headers, monkeypatch
+    ):
+        # The 409 for unmounted PG credentials fires after schema+stage are made;
+        # its status is preserved AND those two objects are rolled back.
+        monkeypatch.setattr(main, "_load_pg_credentials", lambda force_reload=False: ("localhost:5432", ""))
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 409
+        assert fake_sf.calls_for("drop_schema_cascade")
+        assert fake_registry.get_app("myapp") is None
+
+
+class TestCreateAppPgCredentialReload:
+    """Q4: create_app re-reads the pg_secret so a rotated password is picked up
+    without a controller restart, instead of serving the cached bootstrap value."""
+
+    def test_create_app_forces_fresh_pg_credential_read(
+        self, client, fake_sf, fake_registry, fake_pg_admin, role_headers, monkeypatch
+    ):
+        # Prime the module cache with a stale password, then rotate the source
+        # (env PG_PASS, used when no /secrets/pg file is mounted).
+        main._PG_HOST = "pg.test.local:5432"
+        main._PG_PASSWORD = "STALE-PASSWORD"
+        monkeypatch.setenv("PG_PASS", "ROTATED-PASSWORD")
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 201
+        # The PG_PASS secret is now the per-app provisioned password, not the
+        # bootstrap password itself - so the reload is proven instead by
+        # checking which bootstrap_password value reached provision_app.
+        assert fake_pg_admin.provision_calls[0][1] == "ROTATED-PASSWORD"
+        secret_calls = {args[0]: args[1] for (args, kw) in fake_sf.calls_for("create_or_replace_secret")}
+        assert secret_calls["TESTDB.MXAPP_MYAPP.PG_PASS"] == fake_pg_admin.provisioned_password

@@ -36,6 +36,17 @@ def test_secret_fqn():
     assert main._secret_fqn("MXAPP_MYAPP", "pg_pass") == "TESTDB.MXAPP_MYAPP.PG_PASS"
 
 
+class TestPgUsername:
+    def test_deterministic_same_input_same_output(self):
+        assert main._pg_username("myapp") == main._pg_username("myapp")
+
+    def test_expected_format(self):
+        assert main._pg_username("myapp") == "app_myapp_role"
+
+    def test_lowercased_even_when_app_name_has_uppercase(self):
+        assert main._pg_username("MyApp") == "app_myapp_role"
+
+
 class TestEndpointIsReal:
     def test_real_host(self):
         assert main._endpoint_is_real("abc123.snowflakecomputing.app") is True
@@ -98,6 +109,15 @@ class TestBuildSpec:
     def test_pg_host_from_env_fallback(self):
         spec = self._spec()
         assert spec["spec"]["containers"][0]["env"]["RUNTIME_PARAMS_DATABASEHOST"] == "pg.test.local:5432"
+
+    def test_database_username_is_per_app_not_shared_bootstrap(self):
+        # Regression guard for the cross-tenant credential breach: the runtime
+        # must authenticate as its own dedicated role, never the shared
+        # bootstrap "application" role.
+        spec = self._spec(app_name="myapp")
+        username = spec["spec"]["containers"][0]["env"]["RUNTIME_PARAMS_DATABASEUSERNAME"]
+        assert username == main._pg_username("myapp")
+        assert username != "application"
 
     def test_per_constant_secret_entries(self):
         constants = [PadConstant(name="Mod.A", env_var="", default="v", secret_name="MX_CONST_MOD_A")]

@@ -82,12 +82,23 @@ class TestResolveCallerInternalPath:
         identity = auth.resolve_caller(req)
         assert identity.roles == set()
 
-    def test_internal_auth_token_unset_trusts_headers(self, monkeypatch):
+    def test_internal_auth_token_unset_denies_roles(self, monkeypatch):
         monkeypatch.setattr(auth, "_INTERNAL_AUTH_TOKEN", None)
-        req = _make_request({"X-Operator": "bob", "X-Operator-Roles": "role_a"})
+        req = _make_request({"X-Operator": "bob", "X-Operator-Roles": "ACCOUNTADMIN"})
         identity = auth.resolve_caller(req)
-        assert identity.roles == {"ROLE_A"}
-        assert identity.user == "bob"
+        assert identity.roles == set()
+        assert identity.user is None
+
+    def test_internal_auth_token_unset_denies_even_with_internal_header(self, monkeypatch):
+        monkeypatch.setattr(auth, "_INTERNAL_AUTH_TOKEN", None)
+        req = _make_request({
+            "X-Internal-Auth": "anything",
+            "X-Operator": "bob",
+            "X-Operator-Roles": "ACCOUNTADMIN",
+        })
+        identity = auth.resolve_caller(req)
+        assert identity.roles == set()
+        assert identity.user is None
 
 
 class TestResolveCallerTokenPath:

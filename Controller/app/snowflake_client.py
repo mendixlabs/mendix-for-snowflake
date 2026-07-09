@@ -31,6 +31,13 @@ def _is_recoverable(exc: Exception) -> bool:
 _lock = threading.RLock()
 _conn: snowflake.connector.SnowflakeConnection | None = None
 
+# Bound how long a hung connect() or in-flight statement can block the single
+# shared connection, since a wedged call would otherwise stall every app the
+# single-worker controller manages.
+_LOGIN_TIMEOUT_SECS = 30
+_NETWORK_TIMEOUT_SECS = 60
+_STATEMENT_TIMEOUT_SECS = 60
+
 def require_env(name: str) -> str:
     """Read a required env var, raising a clear RuntimeError instead of a bare
     KeyError if a future service-spec edit ever drops it."""
@@ -67,6 +74,8 @@ def get_connection() -> snowflake.connector.SnowflakeConnection:
                 authenticator="oauth",
                 database=database,
                 schema=schema,
+                login_timeout=_LOGIN_TIMEOUT_SECS,
+                network_timeout=_NETWORK_TIMEOUT_SECS,
             )
     return _conn
 
@@ -79,7 +88,7 @@ def execute_sql(sql: str, params: tuple = ()) -> list[dict]:
         try:
             conn = get_connection()
             cur = conn.cursor(snowflake.connector.DictCursor)
-            cur.execute(sql, params)
+            cur.execute(sql, params, timeout=_STATEMENT_TIMEOUT_SECS)
             return cur.fetchall()
         except Exception as e:
             # Drop the connection so the next get_connection() reconnects and
@@ -224,6 +233,7 @@ def show_service_status(name: str) -> str | None:
         if rows:
             return rows[0].get("status")
     except Exception:
+        logger.warning("show_service_status failed for %s.%s", _DB_SCHEMA, name, exc_info=True)
         return None
     return None
 
@@ -234,6 +244,7 @@ def show_all_service_statuses() -> dict[str, str]:
         rows = execute_sql(f"SHOW SERVICES IN SCHEMA {_DB_SCHEMA}")
         return {row["name"]: row.get("status") for row in rows}
     except Exception:
+        logger.warning("show_all_service_statuses failed for schema %s", _DB_SCHEMA, exc_info=True)
         return {}
 
 
@@ -249,6 +260,7 @@ def get_service_endpoint(name: str) -> str | None:
             if url and "." in url and " " not in url:
                 return url if url.startswith("https://") else f"https://{url}"
     except Exception:
+        logger.warning("get_service_endpoint failed for %s.%s", _DB_SCHEMA, name, exc_info=True)
         return None
     return None
 

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import io
 import zipfile
 
 import pytest
 
+from app import pad_parser
 from app.pad_parser import (
+    PAD_ZIP_MEMBER_MAX_BYTES,
     PadConstant,
     _build_constants,
     _parse_defaults,
     _parse_variables,
+    _read_zip_member,
     parse_from_directory,
     parse_from_zip,
     parse_user_roles_from_zip,
@@ -169,3 +173,70 @@ class TestParseUserRolesFromZip:
         metadata = '{"Roles": {"uuid-1": {"Name": "User"}, "uuid-2": {"Name": "User"}}}'
         zpath = self._zip_with_metadata(tmp_path, metadata)
         assert parse_user_roles_from_zip(zpath) == ["User"]
+
+
+class TestReadZipMemberSizeCap:
+    """Unit tests for the bounded reader against a monkeypatched (small) cap,
+    so they run in milliseconds instead of needing real oversized payloads."""
+
+    def _zip_with_member(self, data: bytes, name: str = "member.txt") -> zipfile.ZipFile:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(name, data)
+        buf.seek(0)
+        return zipfile.ZipFile(buf)
+
+    def test_declared_size_over_cap_raises_without_reading(self, monkeypatch):
+        monkeypatch.setattr(pad_parser, "PAD_ZIP_MEMBER_MAX_BYTES", 1024)
+        zf = self._zip_with_member(b"0" * 5000)
+        with pytest.raises(ValueError, match="exceeding the 1024-byte per-member cap"):
+            _read_zip_member(zf, "member.txt", [0])
+
+    def test_at_cap_boundary_reads_normally(self, monkeypatch):
+        # Exactly at the cap must not be rejected - only strictly over it.
+        monkeypatch.setattr(pad_parser, "PAD_ZIP_MEMBER_MAX_BYTES", 1024)
+        zf = self._zip_with_member(b"0" * 1024)
+        assert len(_read_zip_member(zf, "member.txt", [0])) == 1024
+
+    def test_within_cap_reads_normally(self, monkeypatch):
+        monkeypatch.setattr(pad_parser, "PAD_ZIP_MEMBER_MAX_BYTES", 1024)
+        zf = self._zip_with_member(b"hello world")
+        assert _read_zip_member(zf, "member.txt", [0]) == b"hello world"
+
+    def test_total_read_cap_raises_across_members(self, monkeypatch):
+        monkeypatch.setattr(pad_parser, "PAD_ZIP_MEMBER_MAX_BYTES", 1024)
+        monkeypatch.setattr(pad_parser, "PAD_ZIP_TOTAL_READ_MAX_BYTES", 1500)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("a.txt", b"1" * 1000)
+            zf.writestr("b.txt", b"2" * 1000)
+        buf.seek(0)
+        with zipfile.ZipFile(buf) as zf:
+            total_read = [0]
+            _read_zip_member(zf, "a.txt", total_read)
+            with pytest.raises(ValueError, match="total read cap"):
+                _read_zip_member(zf, "b.txt", total_read)
+
+
+class TestParseFromZipDecompressionBomb:
+    """End-to-end: a highly-compressible oversized member (bomb-shaped) must be
+    rejected by parse_from_zip rather than fully decompressed into memory."""
+
+    def test_bomb_shaped_defaults_member_raises(self, tmp_path):
+        # Declares far more than PAD_ZIP_MEMBER_MAX_BYTES of uncompressed zeros,
+        # which compress down to a tiny member - the classic zip-bomb shape.
+        bomb = b"0" * (PAD_ZIP_MEMBER_MAX_BYTES + 1024)
+        zpath = tmp_path / "pad.zip"
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("etc/constants/defaults.conf", bomb)
+            zf.writestr("etc/constants/variables.conf", '"A.B" = ${?A_B}')
+        with pytest.raises(ValueError, match="per-member cap"):
+            parse_from_zip(zpath)
+
+    def test_normal_pad_still_parses(self, make_pad_zip):
+        # A real PAD's defaults.conf/variables.conf are tiny; the cap must not
+        # interfere with the happy path.
+        zpath = make_pad_zip()
+        result = parse_from_zip(zpath)
+        assert len(result) == 1
+        assert result[0].name == "MyModule.MyConst"

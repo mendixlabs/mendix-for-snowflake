@@ -16,7 +16,7 @@ import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from . import activity, auth, registry, snowflake_client as sf
+from . import activity, auth, pg_admin, registry, snowflake_client as sf
 from .models import (
     AppRecord,
     AppStatusResponse,
@@ -172,14 +172,21 @@ _PG_HOST: str | None = None
 _PG_PASSWORD: str | None = None
 
 
-def _load_pg_credentials() -> tuple[str, str]:
+def _load_pg_credentials(force_reload: bool = False) -> tuple[str, str]:
     """Read the bound pg_secret (GENERIC_STRING) mounted at /secrets/pg.
 
     The secret string is JSON: {"host": "<host:port>", "password": "<pw>"}.
     Both values are cached after the first read. Falls back to PG_HOST / PG_PASS
     env vars for local development outside SPCS.
+
+    Pass force_reload=True to bypass the cache and re-read the file: create_app
+    does this so a rotated pg_secret password is picked up for newly created apps
+    without waiting for a controller restart.
     """
     global _PG_HOST, _PG_PASSWORD
+    if force_reload:
+        _PG_HOST = None
+        _PG_PASSWORD = None
     if _PG_HOST is None or _PG_PASSWORD is None:
         secret_file = "/secrets/pg/secret_string"
         if os.path.exists(secret_file):
@@ -229,6 +236,13 @@ def _secret_fqn(app_schema: str, name: str) -> str:
     return f"{_schema_fqn(app_schema)}.{name.upper()}"
 
 
+def _pg_username(app_name: str) -> str:
+    """Per-app Postgres role name - the single source of truth used both when
+    provisioning the role (pg_admin.provision_app) and when building the
+    service spec (RUNTIME_PARAMS_DATABASEUSERNAME), so the two always match."""
+    return f"app_{app_name.lower()}_role"
+
+
 def _const_secret_name(const_name: str) -> str:
     return "MX_CONST_" + const_name.replace(".", "_").upper()
 
@@ -274,7 +288,7 @@ def _build_spec(
         "RUNTIME_PARAMS_DATABASETYPE": "POSTGRESQL",
         "RUNTIME_PARAMS_DATABASEHOST": pg_host_port,
         "RUNTIME_PARAMS_DATABASENAME": pg_database,
-        "RUNTIME_PARAMS_DATABASEUSERNAME": "application",
+        "RUNTIME_PARAMS_DATABASEUSERNAME": _pg_username(app_name),
         "RUNTIME_PARAMS_DATABASEUSESSL": "true",
         "RUNTIME_PARAMS_COM_MENDIX_CORE_STORAGESERVICE": "com.mendix.storage.localfilesystem",
         "RUNTIME_PARAMS_UPLOADEDFILESPATH": "/mnt/filestorage",
@@ -384,13 +398,33 @@ def _record_for_read(name: str, roles: set[str]) -> AppRecord:
     return record
 
 
-def _record_for_mutation(name: str, roles: set[str]) -> AppRecord:
-    """Load an app the caller may mutate: 404 if missing, 403 if not authorized."""
+# Statuses meaning a background task is already changing this app's service
+# state (ALTER SERVICE / suspend / resume). Mirrors the Admin UI's client-side
+# _TRANSIENT set (Admin UI/app/pages/1_Apps.py), which disables the
+# corresponding buttons for the same reason - kept in sync manually since the
+# two packages don't share a module.
+_TRANSIENT_STATUSES = {"DEPLOYING", "SUSPENDING", "RESUMING"}
+
+
+def _record_for_mutation(name: str, roles: set[str], *, block_transient: bool = True) -> AppRecord:
+    """Load an app the caller may mutate: 404 if missing, 403 if not authorized,
+    409 if block_transient and a prior mutation on this app hasn't finished yet
+    (last_deploy_status in _TRANSIENT_STATUSES). Without this guard, two
+    near-simultaneous calls launch competing ALTER SERVICE operations and race
+    on last_deploy_status; block_transient=False is for callers where that
+    race does not apply.
+    """
     record = registry.get_app(name)
     if not record:
         raise HTTPException(status_code=404, detail=f"App '{name}' not found")
     if not auth.authorize(record.owner_role, roles):
         raise HTTPException(status_code=403, detail=f"Not authorized for app '{name}'")
+    if block_transient and record.last_deploy_status in _TRANSIENT_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"App '{name}' is currently {record.last_deploy_status} - another change is "
+                   "already in progress. Wait for it to finish and retry.",
+        )
     return record
 
 
@@ -466,6 +500,49 @@ def list_apps(roles: set[str] = Depends(caller_roles)):
     return result
 
 
+def _teardown_app_objects(name: str, service_name: str, app_schema: str,
+                          pg_database: str | None = None) -> list[str]:
+    """Best-effort drop of every Snowflake object create_app makes, in reverse,
+    plus (when pg_database is given) the app's per-app Postgres role/database.
+
+    Every drop is IF EXISTS, so it is safe to call whether or not the object was
+    created (partial create_app failure) and safe to retry. Returns the list of
+    step names that raised, so the caller can decide whether to keep a registry
+    row alive as a retry handle. Shared by delete_app and create_app's rollback.
+    """
+    cleanup_steps = [
+        # Dropping the service auto-drops its service roles (revoking the
+        # endpoint grant from app_admin); the per-app application role
+        # persists, so drop it separately.
+        ("drop service", lambda: sf.drop_service(service_name)),
+        ("drop application role", lambda: sf.drop_app_access_role(name)),
+        # The app's schema contains everything it owns: credential secrets
+        # (PG password, admin password, constants) and the filestorage stage.
+        # CASCADE removes them all, including the user's uploaded files; the
+        # admin UI warns about this before the delete.
+        ("drop schema", lambda: sf.drop_schema_cascade(_schema_fqn(app_schema))),
+    ]
+    if pg_database is not None:
+        # Drop the Snowflake objects first, then release the Postgres role and
+        # database last: the Snowflake drops never depend on Postgres being
+        # reachable, so a transient Postgres connection failure only blocks
+        # this one step rather than derailing the rest of the cleanup.
+        def _deprovision_pg() -> None:
+            host, bootstrap_pw = _load_pg_credentials()
+            pg_admin.deprovision_app(host, bootstrap_pw, pg_database, _pg_username(name))
+
+        cleanup_steps.append(("deprovision postgres", _deprovision_pg))
+
+    failures = []
+    for step, run in cleanup_steps:
+        try:
+            run()
+        except Exception as exc:
+            logger.warning("teardown %s: %s failed: %s", name, step, exc)
+            failures.append(step)
+    return failures
+
+
 @app.post("/apps", status_code=status.HTTP_201_CREATED)
 def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
     if not auth.authorize(req.owner_role, roles):
@@ -486,68 +563,94 @@ def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
     service_name = _service_name(req.name)
     app_schema = _app_schema_name(req.name)
 
-    # The app's own schema holds everything it owns (secrets, filestorage
-    # stage); delete_app removes it with one DROP SCHEMA ... CASCADE.
-    sf.create_schema(_schema_fqn(app_schema))
-    sf.create_stage(_filestorage_stage(app_schema))
+    # Create Snowflake objects and the registry row as one unit. If any step
+    # raises mid-sequence, roll back every object we made so a partial create
+    # doesn't orphan a schema/service with no registry row to retry or clean up
+    # from (contrast delete_app, which survives partial failure by design).
+    try:
+        # The app's own schema holds everything it owns (secrets, filestorage
+        # stage); delete_app removes it with one DROP SCHEMA ... CASCADE.
+        sf.create_schema(_schema_fqn(app_schema))
+        sf.create_stage(_filestorage_stage(app_schema))
 
-    # Create PG password and admin password secrets.
-    # Read the bootstrap PG password from the controller's bound pg_secret (/secrets/pg).
-    # req.pg_database is the target database name, not the password.
-    _, pg_password = _load_pg_credentials()
-    if not pg_password:
-        raise HTTPException(status_code=409, detail="Controller PG credentials not mounted at /secrets/pg")
-    sf.create_or_replace_secret(_secret_fqn(app_schema, "PG_PASS"), pg_password)
-    sf.create_or_replace_secret(_secret_fqn(app_schema, "ADMIN_PASS"), req.admin_password)
+        # Create PG password and admin password secrets.
+        # Read the bootstrap PG password from the controller's bound pg_secret (/secrets/pg).
+        # Force a fresh read so a rotated pg_secret isn't served stale to new apps.
+        # req.pg_database is the target database name, not the password.
+        pg_host, bootstrap_password = _load_pg_credentials(force_reload=True)
+        if not bootstrap_password:
+            raise HTTPException(status_code=409, detail="Controller PG credentials not mounted at /secrets/pg")
+        # Provision a dedicated Postgres role + database scoped to only this app
+        # (see pg_admin module docstring): the container is handed this per-app
+        # credential, never the shared bootstrap one, so a breached container
+        # cannot reach any other app's database.
+        app_password = pg_admin.provision_app(pg_host, bootstrap_password, req.pg_database, _pg_username(req.name))
+        sf.create_or_replace_secret(_secret_fqn(app_schema, "PG_PASS"), app_password)
+        sf.create_or_replace_secret(_secret_fqn(app_schema, "ADMIN_PASS"), req.admin_password)
 
-    # Born-licensed app: the key is a credential (write straight to its secret,
-    # never held in a local variable beyond this call); the id is stored on the
-    # record below like any other plain field. CreateAppRequest validates both-or-neither.
-    if req.license_id and req.license_key:
-        sf.create_or_replace_secret(_secret_fqn(app_schema, "MX_LICENSE_KEY"), req.license_key)
+        # Born-licensed app: the key is a credential (write straight to its secret,
+        # never held in a local variable beyond this call); the id is stored on the
+        # record below like any other plain field. CreateAppRequest validates both-or-neither.
+        if req.license_id and req.license_key:
+            sf.create_or_replace_secret(_secret_fqn(app_schema, "MX_LICENSE_KEY"), req.license_key)
 
-    # Create constant secrets from provided values (using defaults for any not supplied)
-    constants: list[PadConstant] = []  # no PAD yet at create time
-    for const_name, value in req.constants.items():
-        secret_name = _const_secret_name(const_name)
-        sf.create_or_replace_secret(_secret_fqn(app_schema, secret_name), value)
-        constants.append(PadConstant(name=const_name, env_var="", default=value, secret_name=secret_name))
+        # Create constant secrets from provided values (using defaults for any not supplied)
+        constants: list[PadConstant] = []  # no PAD yet at create time
+        for const_name, value in req.constants.items():
+            secret_name = _const_secret_name(const_name)
+            sf.create_or_replace_secret(_secret_fqn(app_schema, secret_name), value)
+            constants.append(PadConstant(name=const_name, env_var="", default=value, secret_name=secret_name))
 
-    spec = _build_spec(req.name, app_schema, req.pg_database, req.resource_tier, constants, req.use_caller_rights,
-                       req.license_id)
+        spec = _build_spec(req.name, app_schema, req.pg_database, req.resource_tier, constants, req.use_caller_rights,
+                           req.license_id)
 
-    sf.create_service(service_name, spec, COMPUTE_POOL, PG_EAI, QUERY_WAREHOUSE)
+        sf.create_service(service_name, spec, COMPUTE_POOL, PG_EAI, QUERY_WAREHOUSE)
 
-    # Data-plane access control: gate the public endpoint behind a per-app
-    # APPLICATION role. End-user membership of app_<name>_user is managed
-    # in the IdP via SCIM (GRANT APPLICATION ROLE ... TO USER). Also grant app_admin
-    # so any operator can reach the app before the IdP group is populated (owner
-    # bootstrap; replaces the old owner_role grant - an application cannot grant its
-    # service role to a consumer account role).
-    sf.create_app_access_role(req.name)
-    sf.grant_endpoint_to_app_role(service_name, sf.app_access_role_name(req.name))
-    sf.grant_endpoint_to_app_role(service_name, sf.APP_ADMIN_ROLE)
+        # Data-plane access control: gate the public endpoint behind a per-app
+        # APPLICATION role. End-user membership of app_<name>_user is managed
+        # in the IdP via SCIM (GRANT APPLICATION ROLE ... TO USER). Also grant app_admin
+        # so any operator can reach the app before the IdP group is populated (owner
+        # bootstrap; replaces the old owner_role grant - an application cannot grant its
+        # service role to a consumer account role).
+        sf.create_app_access_role(req.name)
+        sf.grant_endpoint_to_app_role(service_name, sf.app_access_role_name(req.name))
+        sf.grant_endpoint_to_app_role(service_name, sf.APP_ADMIN_ROLE)
 
-    # Endpoint URL is not available until the service starts; it's captured by _run_deploy.
-    record = AppRecord(
-        name=req.name,
-        service_name=service_name,
-        app_schema=app_schema,
-        pg_database=req.pg_database,
-        resource_tier=req.resource_tier,
-        use_caller_rights=req.use_caller_rights,
-        constants=req.constants,
-        license_id=req.license_id,
-        pad_stage_path=None,
-        endpoint_url=None,
-        # Non-transient: the app has no PAD yet. A transient status here would
-        # disable the Redeploy action that performs the first deploy (deadlock).
-        last_deploy_status="NOT_DEPLOYED",
-        created_at=None,
-        last_deployed_at=None,
-        owner_role=req.owner_role,
-    )
-    registry.create_app(record)
+        # Endpoint URL is not available until the service starts; it's captured by _run_deploy.
+        record = AppRecord(
+            name=req.name,
+            service_name=service_name,
+            app_schema=app_schema,
+            pg_database=req.pg_database,
+            resource_tier=req.resource_tier,
+            use_caller_rights=req.use_caller_rights,
+            constants=req.constants,
+            license_id=req.license_id,
+            pad_stage_path=None,
+            endpoint_url=None,
+            # Non-transient: the app has no PAD yet. A transient status here would
+            # disable the Redeploy action that performs the first deploy (deadlock).
+            last_deploy_status="NOT_DEPLOYED",
+            created_at=None,
+            last_deployed_at=None,
+            owner_role=req.owner_role,
+        )
+        registry.create_app(record)
+    except Exception as exc:
+        # Best-effort rollback of whatever was created before the failure. Every
+        # drop is IF EXISTS, so dropping objects that were never created is safe.
+        rollback_failures = _teardown_app_objects(req.name, service_name, app_schema,
+                                                  pg_database=req.pg_database)
+        # Preserve the original status for validation failures (e.g. the 409 for
+        # unmounted PG credentials); only unexpected errors become a 502.
+        if isinstance(exc, HTTPException):
+            raise
+        detail = f"Failed to create app '{req.name}': {exc}"
+        if rollback_failures:
+            detail += f"; rollback also failed ({', '.join(rollback_failures)}) - manual cleanup may be needed"
+        else:
+            detail += "; created objects were rolled back"
+        raise HTTPException(status_code=502, detail=detail) from exc
 
     return {"service_name": service_name, "status": "NOT_DEPLOYED"}
 
@@ -663,13 +766,18 @@ def update_compute_pool(req: UpdateComputePoolRequest, roles: set[str] = Depends
         raise HTTPException(status_code=403, detail="Restricted to privileged roles")
     if req.min_nodes is None and req.max_nodes is None and req.auto_suspend_secs is None:
         raise HTTPException(status_code=400, detail="At least one field must be provided")
-    sf.alter_compute_pool(
-        COMPUTE_POOL,
-        min_nodes=req.min_nodes,
-        max_nodes=req.max_nodes,
-        auto_suspend_secs=req.auto_suspend_secs,
-    )
-    pool = sf.get_compute_pool(COMPUTE_POOL)
+    # A Snowflake failure here (invalid sizing, pool busy, transient error) must
+    # surface as a 502, not a raw 500, mirroring the logs routes.
+    try:
+        sf.alter_compute_pool(
+            COMPUTE_POOL,
+            min_nodes=req.min_nodes,
+            max_nodes=req.max_nodes,
+            auto_suspend_secs=req.auto_suspend_secs,
+        )
+        pool = sf.get_compute_pool(COMPUTE_POOL)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to update compute pool: {exc}") from exc
     return pool or {}
 
 
@@ -1125,7 +1233,11 @@ def resume_app(name: str, background_tasks: BackgroundTasks,
 
 @app.delete("/apps/{name}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_app(name: str, roles: set[str] = Depends(caller_roles)):
-    record = _record_for_mutation(name, roles)
+    # Delete runs its suspend + cleanup synchronously in this request rather than
+    # as a background task, so it doesn't race a concurrent ALTER SERVICE the way
+    # the other mutations do; blocking it on a transient status would also remove
+    # the only way to clear an app stuck mid-transition.
+    record = _record_for_mutation(name, roles, block_transient=False)
 
     try:
         sf.suspend_service(record.service_name)
@@ -1133,30 +1245,14 @@ def delete_app(name: str, roles: set[str] = Depends(caller_roles)):
     except Exception:
         pass
 
-    # Every drop below is IF EXISTS, so a partially failed delete is safe to
-    # retry. Attempt each step even when an earlier one fails, then keep the
-    # registry row alive if anything failed: the row is the operator's only
-    # handle for retrying, and deleting it while a service or schema survives
-    # would leak that object with nothing left pointing at it.
-    cleanup_steps = [
-        # Dropping the service auto-drops its service roles (revoking the
-        # endpoint grant from app_admin); the per-app application role
-        # persists, so drop it separately.
-        ("drop service", lambda: sf.drop_service(record.service_name)),
-        ("drop application role", lambda: sf.drop_app_access_role(name)),
-        # The app's schema contains everything it owns: credential secrets
-        # (PG password, admin password, constants) and the filestorage stage.
-        # CASCADE removes them all, including the user's uploaded files; the
-        # admin UI warns about this before the delete.
-        ("drop schema", lambda: sf.drop_schema_cascade(_schema_fqn(record.app_schema))),
-    ]
-    failures = []
-    for step, run in cleanup_steps:
-        try:
-            run()
-        except Exception as exc:
-            logger.warning("delete %s: %s failed: %s", name, step, exc)
-            failures.append(step)
+    # Attempt every drop even when an earlier one fails, then keep the registry
+    # row alive if anything failed: the row is the operator's only handle for
+    # retrying, and deleting it while a service or schema survives would leak
+    # that object with nothing left pointing at it. Deleting the app also drops
+    # its Postgres database and role - intentional, since delete is already
+    # destructive and there is no install base to protect.
+    failures = _teardown_app_objects(name, record.service_name, record.app_schema,
+                                     pg_database=record.pg_database)
     if failures:
         raise HTTPException(
             status_code=502,

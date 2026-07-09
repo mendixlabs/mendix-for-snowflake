@@ -7,6 +7,15 @@ from app.models import HIDDEN_VALUE
 
 
 class TestTriggerDeploy:
+    def test_stranger_403(self, client, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE"))
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OTHER_ROLE"))
+        assert resp.status_code == 403
+
+    def test_unknown_app_404(self, client, fake_registry, make_record, role_headers):
+        resp = client.post("/apps/ghost/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 404
+
     def test_no_zip_staged_400(self, client, fake_sf, fake_registry, make_record, role_headers, staged_pad):
         fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE"))
         # staged_pad fixture only points DEPLOY_STAGE_MOUNT at tmp_path; we never
@@ -215,6 +224,12 @@ class TestUpdateConstants:
                           json={"constants": {"Mod.New": HIDDEN_VALUE}})
         assert resp.status_code == 422
 
+    def test_stranger_403(self, client, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"}))
+        resp = client.put("/apps/myapp/constants", headers=role_headers("OTHER_ROLE"),
+                          json={"constants": {"Mod.A": "new-value"}})
+        assert resp.status_code == 403
+
     def test_changed_value_202_secret_written_synchronously(self, client, fake_sf, fake_registry,
                                                              make_record, role_headers):
         record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={"Mod.A": "old"},
@@ -286,6 +301,26 @@ class TestUpdateSpec:
         assert resp.status_code == 202
         final = fake_registry.get_app("myapp")
         assert final.use_caller_rights is True
+
+    def test_stranger_403(self, client, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE"))
+        resp = client.put("/apps/myapp/spec", headers=role_headers("OTHER_ROLE"),
+                          json={"resource_tier": "large"})
+        assert resp.status_code == 403
+
+    def test_unknown_app_404(self, client, fake_registry, role_headers):
+        resp = client.put("/apps/ghost/spec", headers=role_headers("OWNER_ROLE"),
+                          json={"resource_tier": "large"})
+        assert resp.status_code == 404
+
+    def test_alter_service_spec_exception_marks_failed_no_escape(self, client, fake_sf, fake_registry,
+                                                                  make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE"))
+        fake_sf.raise_on["alter_service_spec"] = RuntimeError("boom")
+        resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
+                          json={"resource_tier": "large"})
+        assert resp.status_code == 202  # exception happens in the background task, not the request
+        assert fake_registry.get_app("myapp").last_deploy_status == "FAILED"
 
 
 class TestSuspendResume:
@@ -369,3 +404,42 @@ class TestSpecRebuildRequiresPad:
         # The guard runs before any secret write or service restart.
         assert fake_sf.calls_for("alter_service_spec") == []
         assert fake_sf.calls_for("create_or_replace_secret") == []
+
+
+class TestTransientStateGuard:
+    """Server-side guard (Q1): a mutation route must refuse a second call while a
+    prior one is still in flight, instead of racing it on ALTER SERVICE /
+    last_deploy_status. Previously this was enforced only client-side, by the
+    Admin UI disabling buttons for _TRANSIENT statuses.
+    """
+
+    @pytest.mark.parametrize("transient_status", ["DEPLOYING", "SUSPENDING", "RESUMING"])
+    def test_suspend_blocked_while_transient(self, client, fake_sf, fake_registry, make_record,
+                                             role_headers, transient_status):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      last_deploy_status=transient_status))
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 409
+        assert fake_sf.calls_for("suspend_service") == []
+
+    def test_suspend_succeeds_once_status_is_terminal_again(self, client, fake_sf, fake_registry,
+                                                             make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", last_deploy_status="DEPLOYING")
+        fake_registry.add(record)
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 409
+
+        # The prior deploy finished; the app is back to a terminal status.
+        fake_registry.update_app("myapp", {"last_deploy_status": "READY"})
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        assert resp.json() == {"status": "SUSPENDING"}
+        assert fake_sf.calls_for("suspend_service")
+
+    def test_trigger_deploy_blocked_while_transient(self, client, fake_sf, fake_registry, make_record,
+                                                     role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      last_deploy_status="SUSPENDING"))
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 409

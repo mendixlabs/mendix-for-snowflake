@@ -28,6 +28,50 @@ _CONSTANT_NAME_RE = re.compile(CONSTANT_NAME_PATTERN)
 USER_ROLE_NAME_MAX = 200
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
+# The zip members read here (defaults.conf, variables.conf, model/metadata.json)
+# are small text/JSON config files; a genuine Mendix PAD never comes close to
+# these caps. The controller runs a single worker, so one PAD with an
+# oversized or highly-compressible member (a decompression bomb) would hang
+# or exhaust its memory for every tenant. A ZipInfo.file_size check alone is
+# not enough because a crafted zip can lie about it, so members are also read
+# with a bounded .read() call that never decompresses past the cap regardless
+# of what the header declares.
+PAD_ZIP_MEMBER_MAX_BYTES = 50 * 1024 * 1024  # 50 MB, per member
+PAD_ZIP_TOTAL_READ_MAX_BYTES = 100 * 1024 * 1024  # 100 MB, across all members read from one PAD
+
+
+def _read_zip_member(zf: zipfile.ZipFile, name: str, total_read: list[int]) -> bytes:
+    """Read one zip member with a per-member and running-total size cap.
+
+    Raises ValueError (the same exception pad_parser already uses to signal
+    an invalid/untrusted PAD) if the member's declared or actual decompressed
+    size exceeds the caps, so callers that already treat a malformed PAD as a
+    4xx don't need to special-case this.
+    """
+    info = zf.getinfo(name)
+    if info.file_size > PAD_ZIP_MEMBER_MAX_BYTES:
+        raise ValueError(
+            f"PAD member {name!r} declares {info.file_size} bytes uncompressed, "
+            f"exceeding the {PAD_ZIP_MEMBER_MAX_BYTES}-byte per-member cap; refusing to read it"
+        )
+    with zf.open(info) as f:
+        # Bounded read: stop decompressing as soon as we have one byte more
+        # than the cap, rather than trusting the (possibly falsified) declared
+        # file_size above.
+        data = f.read(PAD_ZIP_MEMBER_MAX_BYTES + 1)
+    if len(data) > PAD_ZIP_MEMBER_MAX_BYTES:
+        raise ValueError(
+            f"PAD member {name!r} decompressed past the "
+            f"{PAD_ZIP_MEMBER_MAX_BYTES}-byte per-member cap; refusing to read it"
+        )
+    total_read[0] += len(data)
+    if total_read[0] > PAD_ZIP_TOTAL_READ_MAX_BYTES:
+        raise ValueError(
+            f"PAD zip exceeded the {PAD_ZIP_TOTAL_READ_MAX_BYTES}-byte total read cap "
+            f"across its members; refusing to read further"
+        )
+    return data
+
 
 @dataclass
 class PadConstant:
@@ -96,6 +140,7 @@ def parse_from_zip(zip_path: str | Path) -> list[PadConstant]:
     """Parse constants from a PAD zip without fully extracting it."""
     with zipfile.ZipFile(zip_path) as zf:
         names = zf.namelist()
+        total_read = [0]
 
         def _read(suffix: str) -> str | None:
             # Handle both flat layout and single-directory layout inside zip
@@ -104,8 +149,7 @@ def parse_from_zip(zip_path: str | Path) -> list[PadConstant]:
                 return None
             # Prefer the shortest path (closest to root)
             candidates.sort(key=len)
-            with zf.open(candidates[0]) as f:
-                return f.read().decode("utf-8")
+            return _read_zip_member(zf, candidates[0], total_read).decode("utf-8")
 
         defaults_text = _read("etc/constants/defaults.conf")
         variables_text = _read("etc/constants/variables.conf")
@@ -147,8 +191,7 @@ def parse_user_roles_from_zip(zip_path: str | Path) -> list[str]:
             if not candidates:
                 return []
             candidates.sort(key=len)
-            with zf.open(candidates[0]) as f:
-                data = json.loads(f.read().decode("utf-8"))
+            data = json.loads(_read_zip_member(zf, candidates[0], [0]).decode("utf-8"))
 
             roles = data.get("Roles") or {}
             result: list[str] = []

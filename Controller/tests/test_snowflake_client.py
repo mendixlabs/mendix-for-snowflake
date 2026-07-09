@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 from snowflake.connector import errors as sf_errors
 
@@ -110,8 +112,8 @@ class FakeCursor:
         self._raise_exc = raise_exc
         self.executed = []
 
-    def execute(self, sql, params=()):
-        self.executed.append((sql, params))
+    def execute(self, sql, params=(), timeout=None):
+        self.executed.append((sql, params, timeout))
         if self._raise_exc is not None:
             exc = self._raise_exc
             self._raise_exc = None  # only raise once
@@ -186,6 +188,40 @@ class TestExecuteSqlRetry:
             sf.execute_sql("SELECT 1")
 
 
+class TestGetConnectionTimeouts:
+    def test_connect_called_with_login_and_network_timeout(self, monkeypatch):
+        sf._conn = None
+        monkeypatch.setattr(sf, "_read_token", lambda: "fake-token")
+        captured = {}
+
+        class FakeConn:
+            def is_closed(self):
+                return False
+
+        def fake_connect(**kwargs):
+            captured.update(kwargs)
+            return FakeConn()
+
+        monkeypatch.setattr(sf.snowflake.connector, "connect", fake_connect)
+        sf.get_connection()
+        assert captured["login_timeout"] == sf._LOGIN_TIMEOUT_SECS
+        assert captured["network_timeout"] == sf._NETWORK_TIMEOUT_SECS
+        # network_timeout must bound whole-call time, so it can't be shorter
+        # than the login itself.
+        assert captured["network_timeout"] >= captured["login_timeout"]
+
+
+class TestExecuteSqlStatementTimeout:
+    def test_passes_statement_timeout_to_cursor_execute(self, monkeypatch):
+        sf._conn = None
+        cursor = FakeCursor(rows=[{"A": 1}])
+        conn = FakeConnection(cursor)
+        monkeypatch.setattr(sf, "get_connection", lambda: conn)
+        sf.execute_sql("SELECT 1")
+        sql, params, timeout = cursor.executed[0]
+        assert timeout == sf._STATEMENT_TIMEOUT_SECS
+
+
 class TestGetServiceEndpoint:
     def test_provisioning_message_skipped(self, fake_execute_sql):
         fake_execute_sql.returns = [[{"ingress_url": "Endpoints provisioning in progress. Please wait."}]]
@@ -205,6 +241,19 @@ class TestGetServiceEndpoint:
 
         monkeypatch.setattr(sf, "execute_sql", raiser)
         assert sf.get_service_endpoint("myapp_service") is None
+
+    def test_swallows_exceptions_but_logs_warning(self, monkeypatch, caplog):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        with caplog.at_level(logging.WARNING, logger="app.snowflake_client"):
+            result = sf.get_service_endpoint("myapp_service")
+        assert result is None
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert "myapp_service" in caplog.records[0].getMessage()
+        assert caplog.records[0].exc_info is not None
 
 
 class TestGetServiceLogs:
@@ -322,9 +371,34 @@ class TestMisc:
         monkeypatch.setattr(sf, "execute_sql", raiser)
         assert sf.show_all_service_statuses() == {}
 
+    def test_show_all_service_statuses_swallows_exceptions_but_logs_warning(self, monkeypatch, caplog):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        with caplog.at_level(logging.WARNING, logger="app.snowflake_client"):
+            result = sf.show_all_service_statuses()
+        assert result == {}
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert caplog.records[0].exc_info is not None
+
     def test_show_service_status_swallows_exceptions(self, monkeypatch):
         def raiser(sql, params=()):
             raise RuntimeError("boom")
 
         monkeypatch.setattr(sf, "execute_sql", raiser)
         assert sf.show_service_status("myapp_service") is None
+
+    def test_show_service_status_swallows_exceptions_but_logs_warning(self, monkeypatch, caplog):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        with caplog.at_level(logging.WARNING, logger="app.snowflake_client"):
+            result = sf.show_service_status("myapp_service")
+        assert result is None
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert "myapp_service" in caplog.records[0].getMessage()
+        assert caplog.records[0].exc_info is not None

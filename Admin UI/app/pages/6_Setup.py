@@ -105,11 +105,14 @@ CREATE EXTERNAL ACCESS INTEGRATION {eai}
     language="sql",
 )
 
-# --- Step 3: grant CREATEDB to the application PG user -----------------------
-st.subheader("3 - Grant CREATEDB to the `application` Postgres user")
+# --- Step 3: grant CREATEDB + CREATEROLE to the application PG user ----------
+st.subheader("3 - Grant CREATEDB and CREATEROLE to the `application` Postgres user")
 st.caption(
-    "One-time. Each Mendix app gets its own database, auto-created at startup, so "
-    "the application user needs CREATEDB. The instance is unreachable from a "
+    "One-time. The controller - not the container - now provisions each Mendix "
+    "app's own Postgres role and database, so the application user needs both "
+    "CREATEDB and CREATEROLE. Each Mendix app then connects as its own "
+    "least-privilege, per-app role scoped to only its own database, never as "
+    "this shared application user. The instance is unreachable from a "
     "workstation; run it as a short SPCS job using the mendix-base image."
 )
 st.code(
@@ -123,7 +126,7 @@ spec:
   containers:
   - name: psql
     image: /<provider_db>/<provider_schema>/<repo>/mendix-base:latest
-    command: ["bash", "-c", "PGPASSWORD='<application-password>' PGSSLMODE=require psql -h {pg_host} -p {pg_port} -U application -d postgres -c 'ALTER USER application CREATEDB;'"]
+    command: ["bash", "-c", "PGPASSWORD='<application-password>' PGSSLMODE=require psql -h {pg_host} -p {pg_port} -U application -d postgres -c 'ALTER USER application CREATEDB CREATEROLE;'"]
 $$;
 
 -- Wait ~30s, then confirm it logged "ALTER ROLE":
@@ -239,7 +242,16 @@ GRANT USAGE  ON DATABASE <data_db>                           TO ROLE {operator_r
 GRANT USAGE  ON SCHEMA   <data_db>.<data_schema>             TO ROLE {operator_role};
 GRANT SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema> TO ROLE {operator_role};
 GRANT SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema> TO ROLE {operator_role};
-GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO ROLE {operator_role};""",
+GRANT USAGE  ON WAREHOUSE <query_warehouse>                  TO ROLE {operator_role};
+
+-- CALLER grants: a third, separate grant type. Restricted caller's rights needs
+-- all three families together (regular TO APPLICATION, TO ROLE, and CALLER
+-- TO APPLICATION). The ALL-forms require the INHERITED keyword; the plain
+-- non-INHERITED ALL-form errors.
+GRANT CALLER USAGE ON DATABASE <data_db>                                       TO APPLICATION {app_name};
+GRANT CALLER USAGE ON SCHEMA   <data_db>.<data_schema>                         TO APPLICATION {app_name};
+GRANT INHERITED CALLER SELECT ON ALL TABLES IN SCHEMA <data_db>.<data_schema>  TO APPLICATION {app_name};
+GRANT INHERITED CALLER SELECT ON ALL VIEWS  IN SCHEMA <data_db>.<data_schema>  TO APPLICATION {app_name};""",
     language="sql",
 )
 st.caption(
@@ -252,18 +264,27 @@ st.code(
     f"""SHOW GRANTS TO ROLE {operator_role};
 -- Confirm the USAGE/SELECT grants above appear directly on this row. A row that
 -- only shows up because the role inherits it through another role (e.g.
--- ACCOUNTADMIN inheriting SYSADMIN's grants) does not satisfy the check.""",
+-- ACCOUNTADMIN inheriting SYSADMIN's grants) does not satisfy the check.
+
+SHOW CALLER GRANTS TO APPLICATION {app_name};
+-- CALLER grants are listed by this separate command only; SHOW GRANTS does not
+-- include them. Confirm the USAGE/SELECT CALLER grants above appear here.""",
     language="sql",
 )
 st.warning(
     "Without these grants the app reports: *the owning application must have at least "
-    "one CALLER privilege granted on TABLE ...*. If the application grants above are "
-    "already in place and the error persists, check the operator's role next: run "
+    "one CALLER privilege granted on TABLE ...*. That error means the CALLER grant "
+    "family above is missing: run "
+    f"`SHOW CALLER GRANTS TO APPLICATION {app_name}` and re-apply the GRANT CALLER "
+    "statements for anything absent (plain `SHOW GRANTS` does not list CALLER grants). "
+    "If those are in place and the error persists, check the operator's role next: run "
     f"`SHOW GRANTS TO ROLE {operator_role}` and confirm the privilege appears directly, "
     "not only through an inherited role. Snowflake does not allow FUTURE grants "
     "to an application (`Future grant on objects of type TABLE to APPLICATION is "
-    "restricted`), so re-run the ALL TABLES / ALL VIEWS grants after you add new objects "
-    "the app must read. Run these grants before the app first connects. A privilege "
+    "restricted`), so re-run the ALL TABLES / ALL VIEWS grants (regular and CALLER) "
+    "after you add new objects the app must read. Neither grant family survives "
+    "`DROP APPLICATION` + reinstall - re-apply all three per install. Run these grants "
+    "before the app first connects. A privilege "
     "added after the app has opened its Snowflake session is not picked up live: the "
     "app must reconnect with a freshly minted caller token, which can take up to "
     "the approved caller_token_spec app setting (~30 minutes) to rotate. Plan for "

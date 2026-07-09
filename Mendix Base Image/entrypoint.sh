@@ -91,29 +91,11 @@ if [ -n "$SNOWFLAKE_HOST" ]; then
     done < <(env -0)
 fi
 
-# Auto-create PG database if it doesn't exist
-DBNAME="$RUNTIME_PARAMS_DATABASENAME"
-DBHOST=$(echo "$RUNTIME_PARAMS_DATABASEHOST" | cut -d: -f1)
-DBPORT=$(echo "$RUNTIME_PARAMS_DATABASEHOST" | cut -d: -f2)
-DBPORT="${DBPORT:-5432}"
-
-if [ -n "$DBNAME" ] && [ "$DBNAME" != "postgres" ]; then
-    export PGPASSWORD="$RUNTIME_PARAMS_DATABASEPASSWORD"
-    export PGSSLMODE="require"
-    echo "Checking if database '$DBNAME' exists..."
-    # Use || true so a transient connection failure doesn't kill the container via set -e.
-    # Use parameterised query ($1) to avoid SQL injection from the database name.
-    EXISTS=$(psql -h "$DBHOST" -p "$DBPORT" -U "$RUNTIME_PARAMS_DATABASEUSERNAME" -d postgres \
-        -tAc "SELECT 1 FROM pg_database WHERE datname = \$1" -- "$DBNAME" 2>/dev/null) || true
-    if [ "$EXISTS" != "1" ]; then
-        echo "Creating database '$DBNAME'..."
-        psql -h "$DBHOST" -p "$DBPORT" -U "$RUNTIME_PARAMS_DATABASEUSERNAME" -d postgres \
-            -c "CREATE DATABASE \"$(printf '%s' "$DBNAME" | sed "s/\"//g")\"" 2>/dev/null || true
-        echo "Database '$DBNAME' created (or already existed)."
-    else
-        echo "Database '$DBNAME' already exists."
-    fi
-    unset PGPASSWORD PGSSLMODE
-fi
+# The controller now provisions this app's Postgres role and database before
+# the service starts - a per-app role, scoped to only its own database, with
+# its own password (RUNTIME_PARAMS_DATABASEUSERNAME / the pg_pass secret
+# above). The container just connects as that role; it no longer creates its
+# own database here, since the role has neither CREATEDB nor any access to
+# the postgres maintenance database, so the old auto-create would just fail.
 
 exec /mendix/pad/bin/start /mendix/pad/etc/Default

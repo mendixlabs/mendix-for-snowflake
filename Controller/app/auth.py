@@ -148,16 +148,14 @@ def resolve_caller(request: Request) -> CallerIdentity:
     # No Snowflake caller token: this should only be the internal admin-UI hop.
     # The endpoint is public, so trust the vouched-for X-Operator-Roles only when the
     # request proves it is the in-app admin UI by presenting the shared internal token.
-    if _INTERNAL_AUTH_TOKEN is not None:
-        presented = request.headers.get(_INTERNAL_AUTH_HEADER) or ""
-        if not hmac.compare_digest(presented, _INTERNAL_AUTH_TOKEN):
-            logger.warning("Tokenless request without a valid internal auth token; denying roles")
-            return CallerIdentity(user=None, roles=set())
-    else:
-        logger.warning(
-            "INTERNAL_AUTH_TOKEN not set; trusting X-Operator-Roles on the internal path. "
-            "Provision the token (setup_script.sql) to harden the public endpoint."
-        )
+    if _INTERNAL_AUTH_TOKEN is None:
+        # Fail closed: without a configured secret, X-Operator-Roles cannot be trusted.
+        logger.warning("INTERNAL_AUTH_TOKEN not set; denying roles on the internal path")
+        return CallerIdentity(user=None, roles=set())
+    presented = request.headers.get(_INTERNAL_AUTH_HEADER) or ""
+    if not hmac.compare_digest(presented, _INTERNAL_AUTH_TOKEN):
+        logger.warning("Tokenless request without a valid internal auth token; denying roles")
+        return CallerIdentity(user=None, roles=set())
     raw = request.headers.get(_OPERATOR_ROLES_HEADER, "")
     roles = {r.strip().upper() for r in raw.split(",") if r.strip()}
     return CallerIdentity(user=request.headers.get(_OPERATOR_HEADER) or None, roles=roles)

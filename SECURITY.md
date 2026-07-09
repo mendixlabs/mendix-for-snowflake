@@ -60,6 +60,14 @@ prioritization: CRITICAL and HIGH findings are addressed ahead of MEDIUM and LOW
 Released app versions additionally reference images by immutable sha256 digest, so a
 released artifact is exactly the build that passed these gates.
 
+## Data isolation between Mendix apps
+
+Each Mendix app deployed by this controller gets its own Postgres role and
+password, scoped to only that app's own database. The controller provisions
+the per-app role and database when the app is registered; the shared
+`application` bootstrap credential used to create those per-app roles is held
+only by the trusted controller and is never mounted into an app container.
+
 ## Organizational context
 
 This application is developed by a Siemens business (Mendix). For broader context, Siemens (our
