@@ -70,50 +70,62 @@ def _run_bulk(names: list[str], action: str, fn) -> None:
     st.session_state["bulk-last-result"] = {"action": action, "results": results}
 
 
-if st.button("Refresh"):
-    _refresh_now()
-    st.rerun()
+cols = st.columns([1, 1, 4])
+with cols[0]:
+    if st.button("Refresh"):
+        _refresh_now()
+        st.rerun()
+with cols[1]:
+    auto = st.toggle("Auto-refresh", value=False, help="Refresh every 10 seconds.")
 st.caption("Status is fetched on page load and after each action. Click Refresh to re-poll.")
 
-try:
-    apps = list_apps()
-except ControllerError as e:
-    st.error(f"Failed to load apps: {e}")
-    st.stop()
 
-if not apps:
-    st.info("No apps registered yet. Use the Register page to add one.")
-    st.stop()
+@st.fragment(run_every=10 if auto else None)
+def _apps_table() -> tuple[list[dict], list[int]]:
+    if auto:
+        _refresh_now()
+    try:
+        apps = list_apps()
+    except ControllerError as e:
+        st.error(f"Failed to load apps: {e}")
+        st.stop()
 
-table_rows = [
-    {
-        "name": a["name"],
-        "service_status": a.get("service_status") or "",
-        "last_deploy_status": a.get("last_deploy_status") or "",
-        "endpoint_url": a.get("endpoint_url") or "",
-        "pad_file": pad_filename(a.get("pad_stage_path")),
-        "last_deployed_at": a.get("last_deployed_at") or "",
-    }
-    for a in apps
-]
+    if not apps:
+        st.info("No apps registered yet. Use the Register page to add one.")
+        st.stop()
 
-st.caption(
-    "Tick the checkbox at the left edge of a row to open its detail panel. "
-    "Tick several to enable bulk actions (suspend / resume / delete)."
-)
-selection = st.dataframe(
-    table_rows,
-    use_container_width=True,
-    hide_index=True,
-    selection_mode="multi-row",
-    on_select="rerun",
-    column_config={
-        "endpoint_url": st.column_config.LinkColumn("endpoint_url"),
-    },
-    key="apps-dataframe",
-)
+    table_rows = [
+        {
+            "name": a["name"],
+            "service_status": a.get("service_status") or "",
+            "last_deploy_status": a.get("last_deploy_status") or "",
+            "endpoint_url": a.get("endpoint_url") or "",
+            "pad_file": pad_filename(a.get("pad_stage_path")),
+            "last_deployed_at": a.get("last_deployed_at") or "",
+        }
+        for a in apps
+    ]
 
-selected_rows = selection.selection.rows if selection and selection.selection else []
+    st.caption(
+        "Tick the checkbox at the left edge of a row to open its detail panel. "
+        "Tick several to enable bulk actions (suspend / resume / delete)."
+    )
+    selection = st.dataframe(
+        table_rows,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="multi-row",
+        on_select="rerun",
+        column_config={
+            "endpoint_url": st.column_config.LinkColumn("endpoint_url"),
+        },
+        key="apps-dataframe",
+    )
+    selected_rows = selection.selection.rows if selection and selection.selection else []
+    return table_rows, selected_rows
+
+
+table_rows, selected_rows = _apps_table()
 
 
 @st.fragment
@@ -133,6 +145,12 @@ def _detail_panel(selected_name: str) -> None:
     c1.metric("Service status", svc_status)
     c2.metric("Deploy status", deploy_status)
     c3.metric("Resource tier", record.get("resource_tier") or "")
+    st.caption(
+        "Service status is Snowflake's live container state - it can show `PENDING` "
+        "briefly during any restart, including ones this app didn't initiate. "
+        "Deploy status is our own record of the last action requested here and only "
+        "changes when you trigger one."
+    )
 
     if record.get("endpoint_url"):
         st.write(f"Endpoint: {record['endpoint_url']}")

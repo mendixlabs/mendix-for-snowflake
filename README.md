@@ -115,11 +115,12 @@ flowchart TB
 **Deploy an app** (operator, in the Admin UI):
 
 1. Register the app (name, Postgres database, admin password, constants, owner role)
-2. Export a Portable App Distribution from Studio Pro and stage it (directory destination, trailing slash):
+2. Export a Portable App Distribution from Studio Pro and stage it (directory destination, trailing slash; `--connection` is required — `snow stage copy` doesn't fall back to a default):
 
 ```powershell
 snow stage copy "C:\path\to\MyApp_portable_20261201.zip" `
-  "@MENDIX_SPCS_APP.app_public.MENDIX_DEPLOY_STAGE/apps/my-app/"
+  "@MENDIX_SPCS_APP.app_public.MENDIX_DEPLOY_STAGE/apps/my-app/" `
+  --connection <conn>
 ```
 
 3. Click **Redeploy** — the controller extracts the PAD and starts the per-app service, no Docker build involved

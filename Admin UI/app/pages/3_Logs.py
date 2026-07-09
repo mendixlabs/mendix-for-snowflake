@@ -94,7 +94,7 @@ _LOG_HEIGHT = 600
 _SCROLL_INIT_KEY = f"logs-scrolled-init::{selected}"
 
 
-def _scroll_script(is_first_render: bool) -> str:
+def _scroll_script(is_first_render: bool, logs: str) -> str:
     """Snap a Streamlit bordered container to the bottom.
 
     On first render for an app, always snap so the newest line is visible.
@@ -102,7 +102,15 @@ def _scroll_script(is_first_render: bool) -> str:
     user was already pinned to the bottom — chat-client tail behavior.
     """
     first_js = "true" if is_first_render else "false"
+    # components.html renders through a React.memo'd <iframe srcDoc=...>: if this
+    # function returns byte-identical HTML on every tick (it does, once
+    # is_first_render settles to False), React never touches the DOM and the
+    # <script> below never runs again, so auto-refresh ticks stop being noticed.
+    # Embedding a marker that changes only when the log content actually changes
+    # forces a fresh render exactly when there's something new to scroll to.
+    nonce = hash(logs) & 0xFFFFFFFF
     return f"""
+    <!-- logs:{nonce} -->
     <script>
       const doc = window.parent.document;
       const snap = () => {{
@@ -170,7 +178,7 @@ def _log_view() -> None:
 
     is_first_render = _SCROLL_INIT_KEY not in st.session_state
     st.session_state[_SCROLL_INIT_KEY] = True
-    components.html(_scroll_script(is_first_render), height=0)
+    components.html(_scroll_script(is_first_render, logs), height=0)
 
 
 _log_view()
