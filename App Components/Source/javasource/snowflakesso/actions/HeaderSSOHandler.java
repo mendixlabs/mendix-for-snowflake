@@ -12,6 +12,8 @@ import com.mendix.systemwideinterfaces.core.IUser;
 
 import com.mendix.core.objectmanagement.member.MendixObjectReferenceSet;
 
+import snowflakesso.CallerTokenCache;
+
 import net.snowflake.client.jdbc.internal.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.servlet.http.HttpServletRequest;
@@ -82,6 +84,21 @@ public class HeaderSSOHandler extends RequestHandler {
             return;
         }
 
+        // 1b. The header alone is not proof of identity - it is only trustworthy
+        // because SPCS ingress is assumed not to forward it from anywhere but the
+        // authenticated edge. Whenever a caller token is present, verify it actually
+        // authenticates as the claimed username before trusting the header at all;
+        // this closes the gap for any path where that ingress assumption doesn't
+        // hold (e.g. a co-resident container reaching this service directly).
+        String callerToken = httpReq.getHeader(HEADER_SF_TOKEN);
+        if (callerToken != null && !callerToken.isBlank()
+                && !verifyCallerIdentity(snowflakeUsername, callerToken)) {
+            response.setStatus(IMxRuntimeResponse.UNAUTHORIZED);
+            httpResp.setContentType("text/plain");
+            httpResp.getWriter().write("Caller token identity mismatch.");
+            return;
+        }
+
         Core.getLogger(LOG_NODE).info("SSO login for Snowflake user: " + snowflakeUsername);
 
         IContext systemContext = Core.createSystemContext();
@@ -109,7 +126,6 @@ public class HeaderSSOHandler extends RequestHandler {
         // mapping is configured. This MUST happen before Core.initializeSession: Mendix
         // fixes the session's role set at session init, so a sync applied after would
         // only take effect at the user's next login.
-        String callerToken = httpReq.getHeader(HEADER_SF_TOKEN);
         syncUserRoles(systemContext, user, callerToken);
 
         // 4. Initialize a session (bypasses password check)
@@ -122,12 +138,10 @@ public class HeaderSSOHandler extends RequestHandler {
             return;
         }
 
-        // 5. Store the caller token on the user object
+        // 5. Cache the caller token in memory (never persisted - see S1b / CallerTokenCache)
         if (callerToken != null && !callerToken.isBlank()) {
-            IMendixObject userObj = user.getMendixObject();
-            userObj.setValue(systemContext, "CallerToken", callerToken);
-            Core.commit(systemContext, userObj);
-            Core.getLogger(LOG_NODE).debug("Stored caller token for: " + snowflakeUsername);
+            CallerTokenCache.put(snowflakeUsername, callerToken);
+            Core.getLogger(LOG_NODE).debug("Cached caller token for: " + snowflakeUsername);
         }
 
         // 6. Let Mendix set all session cookies (XASSESSIONID, CSRF token, flags)
@@ -216,10 +230,7 @@ public class HeaderSSOHandler extends RequestHandler {
             return;
         }
 
-        IMendixObject userObj = user.getMendixObject();
-        userObj.setValue(systemContext, "CallerToken", callerToken);
-        Core.commit(systemContext, userObj);
-
+        CallerTokenCache.put(user.getName(), callerToken);
         Core.getLogger(LOG_NODE).debug("Refreshed caller token for: " + user.getName());
         response.setStatus(204);
     }
@@ -287,10 +298,12 @@ public class HeaderSSOHandler extends RequestHandler {
     }
 
     /**
-     * Opens a compound-token Snowflake session as the caller and returns their
-     * account roles (uppercased). Mirrors the recipe in Admin UI/app/auth.py.
+     * Opens a compound-token Snowflake session as the caller. Shared by role-sync
+     * (fetchAvailableRoles) and caller-token identity verification
+     * (verifyCallerIdentity) - both need the identical OAuth connection recipe.
+     * Mirrors the recipe in Admin UI/app/auth.py.
      */
-    private List<String> fetchAvailableRoles(String callerToken) throws Exception {
+    private Connection openCallerSession(String callerToken) throws Exception {
         String serviceToken = new String(
             Files.readAllBytes(Paths.get(SERVICE_TOKEN_PATH)), StandardCharsets.UTF_8).trim();
         String compound = serviceToken + "." + callerToken;
@@ -308,9 +321,16 @@ public class HeaderSSOHandler extends RequestHandler {
         // causing "No suitable driver" even though the jar is on the classpath.
         Class.forName("net.snowflake.client.api.driver.SnowflakeDriver");
 
+        return DriverManager.getConnection(url, props);
+    }
+
+    /**
+     * Returns the caller's account roles (uppercased), via a caller-rights session.
+     */
+    private List<String> fetchAvailableRoles(String callerToken) throws Exception {
         // No warehouse: CURRENT_AVAILABLE_ROLES() is a session function, run
         // warehouse-less the same way the Admin UI runs it in production.
-        try (Connection conn = DriverManager.getConnection(url, props);
+        try (Connection conn = openCallerSession(callerToken);
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT CURRENT_AVAILABLE_ROLES()")) {
             List<String> roles = new java.util.ArrayList<>();
@@ -326,6 +346,42 @@ public class HeaderSSOHandler extends RequestHandler {
                 }
             }
             return roles;
+        }
+    }
+
+    /**
+     * Verifies that callerToken actually authenticates as claimedUsername, by
+     * opening a real caller-rights Snowflake session and checking CURRENT_USER().
+     * See the call site's comment for why this check exists.
+     *
+     * Returns true only on a confirmed match, or when verification could not be
+     * completed at all (Snowflake unreachable, JDBC failure) - an inconclusive
+     * result does not block login, the same fail-soft philosophy syncUserRoles
+     * already uses for role sync below. Returns false only on a definite,
+     * confirmed mismatch, which is the one case this check exists to catch.
+     */
+    private boolean verifyCallerIdentity(String claimedUsername, String callerToken) {
+        try (Connection conn = openCallerSession(callerToken);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT CURRENT_USER()")) {
+            if (!rs.next()) {
+                Core.getLogger(LOG_NODE).warn(
+                    "Caller token verification returned no row for " + claimedUsername + "; proceeding.");
+                return true;
+            }
+            String actual = rs.getString(1);
+            boolean matches = actual != null && actual.equalsIgnoreCase(claimedUsername);
+            if (!matches) {
+                Core.getLogger(LOG_NODE).error(
+                    "Caller token identity mismatch: header claimed '" + claimedUsername
+                    + "' but the token authenticates as '" + actual + "'. Rejecting.");
+            }
+            return matches;
+        } catch (Exception e) {
+            Core.getLogger(LOG_NODE).warn(
+                "Could not verify caller token identity for " + claimedUsername
+                + " (Snowflake unreachable?); proceeding on header trust: " + e.getMessage());
+            return true;
         }
     }
 

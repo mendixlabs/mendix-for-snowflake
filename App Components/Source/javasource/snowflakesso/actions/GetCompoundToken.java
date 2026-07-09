@@ -9,11 +9,10 @@
 
 package snowflakesso.actions;
 
-import com.mendix.core.Core;
 import com.mendix.systemwideinterfaces.core.IContext;
-import com.mendix.systemwideinterfaces.core.IMendixObject;
 import com.mendix.systemwideinterfaces.core.IUser;
 import com.mendix.systemwideinterfaces.core.UserAction;
+import snowflakesso.CallerTokenCache;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -30,7 +29,6 @@ public class GetCompoundToken extends UserAction<java.lang.String>
 	{
 		// BEGIN USER CODE
 		IContext context = getContext();
-		IContext systemContext = Core.createSystemContext();
 
 		// Read the service OAuth token (auto-refreshed by SPCS)
 		Path tokenPath = Paths.get("/snowflake/session/token");
@@ -41,28 +39,22 @@ public class GetCompoundToken extends UserAction<java.lang.String>
 		}
 		String serviceToken = new String(Files.readAllBytes(tokenPath)).trim();
 
-		// Get the caller token from the current user's SnowflakeUser entity
+		// Get the caller token from the in-memory cache HeaderSSOHandler populates at
+		// login and on each periodic refresh (never persisted to the database - see
+		// CallerTokenCache).
 		IUser currentUser = context.getSession().getUser(context);
 		if (currentUser == null) {
 			throw new RuntimeException("No authenticated user in the current session.");
 		}
 
-		IMendixObject userObj = currentUser.getMendixObject();
-		if (!userObj.isInstanceOf(snowflakesso.proxies.SnowflakeUser.getType())) {
-			throw new RuntimeException(
-				"User " + currentUser.getName() + " is not a SnowflakeUser. "
-				+ "Log out and log back in via the Snowflake SSO handler.");
-		}
-
-		snowflakesso.proxies.SnowflakeUser sfUser =
-			snowflakesso.proxies.SnowflakeUser.initialize(systemContext, userObj);
-		String callerToken = sfUser.getCallerToken(systemContext);
+		String callerToken = CallerTokenCache.get(currentUser.getName());
 
 		if (callerToken == null || callerToken.isBlank()) {
 			throw new RuntimeException(
-				"No caller token stored for user: " + currentUser.getName()
-				+ ". Ensure executeAsCaller is enabled on the service spec "
-				+ "and the user logged in via the Snowflake SSO handler.");
+				"No caller token cached for user: " + currentUser.getName()
+				+ ". Ensure executeAsCaller is enabled on the service spec, the user "
+				+ "logged in via the Snowflake SSO handler, and the cached token hasn't "
+				+ "expired (log out and back in if the session has been open a long time).");
 		}
 
 		// Compound token format: serviceToken.callerToken
