@@ -102,12 +102,26 @@ def provision_app(
             )
             role_exists = cur.fetchone() is not None
 
-            role_verb = "ALTER ROLE" if role_exists else "CREATE ROLE"
+            # Snowflake-managed Postgres denies any CREATE ROLE / ALTER ROLE
+            # statement that names SUPERUSER, CREATEDB, or CREATEROLE at all -
+            # even to set them to their already-default off value - for every
+            # customer role, including snowflake_admin (confirmed live: both
+            # "CREATE ROLE ... NOCREATEROLE ..." and the equivalent combined
+            # ALTER ROLE form raise "permission denied to create/alter role").
+            # A freshly created role already defaults to NOSUPERUSER NOCREATEDB
+            # NOCREATEROLE, so there is nothing to state - only LOGIN + PASSWORD
+            # ever need setting, and only via ALTER ROLE (CREATE ROLE ... LOGIN
+            # PASSWORD combined is blocked too).
+            if not role_exists:
+                cur.execute(
+                    sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                        sql.Identifier(pg_username)
+                    )
+                )
             cur.execute(
-                sql.SQL(
-                    role_verb
-                    + " {} WITH LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE"
-                ).format(sql.Identifier(pg_username), sql.Literal(password))
+                sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD {}").format(
+                    sql.Identifier(pg_username), sql.Literal(password)
+                )
             )
 
             cur.execute(

@@ -113,10 +113,20 @@ st.caption(
     "CREATEDB and CREATEROLE. Each Mendix app then connects as its own "
     "least-privilege, per-app role scoped to only its own database, never as "
     "this shared application user. The instance is unreachable from a "
-    "workstation; run it as a short SPCS job using the mendix-base image."
+    "workstation; run it as a short SPCS job using the mendix-base image. "
+    "`application` cannot grant itself CREATEROLE (Postgres blocks "
+    "self-escalation) - the job must connect as `snowflake_admin` instead, "
+    "whose one-time credentials are regenerated below."
 )
 st.code(
-    f"""CREATE SERVICE {secret_db}.{secret_schema}.PG_SETUP_JOB
+    f"""-- One-time credentials, shown only once - reset if lost.
+ALTER POSTGRES INSTANCE {instance} RESET ACCESS FOR 'snowflake_admin';
+
+CREATE OR REPLACE SECRET {secret_db}.{secret_schema}.PG_ADMIN_TMP_SECRET
+  TYPE = GENERIC_STRING
+  SECRET_STRING = '<snowflake_admin-password-from-above>';
+
+CREATE SERVICE {secret_db}.{secret_schema}.PG_SETUP_JOB
   IN COMPUTE POOL <a-compute-pool>
   MIN_INSTANCES = 1
   MAX_INSTANCES = 1
@@ -126,12 +136,22 @@ spec:
   containers:
   - name: psql
     image: /<provider_db>/<provider_schema>/<repo>/mendix-base:latest
-    command: ["bash", "-c", "PGPASSWORD='<application-password>' PGSSLMODE=require psql -h {pg_host} -p {pg_port} -U application -d postgres -c 'ALTER USER application CREATEDB CREATEROLE;'"]
+    command:
+    - bash
+    - -c
+    - |
+      pw=$(cat /secrets/pgadmin/secret_string)
+      PGPASSWORD="$pw" PGSSLMODE=require psql -h {pg_host} -p {pg_port} -U snowflake_admin -d postgres -c 'ALTER USER application CREATEROLE;'
+      sleep 60
+    secrets:
+    - snowflakeSecret: {secret_db}.{secret_schema}.PG_ADMIN_TMP_SECRET
+      directoryPath: /secrets/pgadmin
 $$;
 
 -- Wait ~30s, then confirm it logged "ALTER ROLE":
 CALL SYSTEM$GET_SERVICE_LOGS('{secret_db}.{secret_schema}.PG_SETUP_JOB', '0', 'psql', 5);
-DROP SERVICE {secret_db}.{secret_schema}.PG_SETUP_JOB;""",
+DROP SERVICE {secret_db}.{secret_schema}.PG_SETUP_JOB;
+DROP SECRET  {secret_db}.{secret_schema}.PG_ADMIN_TMP_SECRET;""",
     language="sql",
 )
 

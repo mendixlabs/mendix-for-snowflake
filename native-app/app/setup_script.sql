@@ -358,10 +358,24 @@ capabilities:
   securityContext:
     executeAsCaller: true';
 
+    -- EXTERNAL_ACCESS_INTEGRATIONS = (reference('pg_eai')) is required on the
+    -- controller's own service, not just passed through as the PG_EAI env var
+    -- above: since the S1 per-app-Postgres-role redesign, the controller
+    -- connects to Postgres directly (pg_admin.py, via psycopg) to provision
+    -- each app's role/database, and that outbound connection needs the
+    -- controller container's own network egress grant. Without this the
+    -- controller's psycopg.connect() fails with "Name or service not known"
+    -- (no egress at all, not a DNS-specific issue) on every create_app call.
+    -- CREATE SERVICE will not accept MIN_INSTANCES/MAX_INSTANCES/QUERY_WAREHOUSE
+    -- split across the FROM SPECIFICATION block from EXTERNAL_ACCESS_INTEGRATIONS -
+    -- all trailing clauses must stay on the same side of FROM SPECIFICATION
+    -- (confirmed live: putting EAI before it while these stayed after produced a
+    -- syntax error at the closing dollar-quote delimiter).
     ddl := 'CREATE SERVICE IF NOT EXISTS ' || db_schema || '.MENDIX_DEPLOY_CONTROLLER' ||
            ' IN COMPUTE POOL ' || pool ||
            ' FROM SPECIFICATION ' || dollar || spec || dollar ||
-           ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh;
+           ' MIN_INSTANCES = 1 MAX_INSTANCES = 1 QUERY_WAREHOUSE = ' || wh ||
+           ' EXTERNAL_ACCESS_INTEGRATIONS = (reference(''pg_eai''))';
     EXECUTE IMMEDIATE ddl;
 
     -- CREATE SERVICE IF NOT EXISTS above is a no-op once the service already
@@ -372,6 +386,12 @@ capabilities:
     -- brief restart on every upgrade even when this spec is unchanged.
     EXECUTE IMMEDIATE 'ALTER SERVICE ' || db_schema || '.MENDIX_DEPLOY_CONTROLLER' ||
         ' FROM SPECIFICATION ' || dollar || spec || dollar;
+
+    -- ALTER SERVICE ... FROM SPECIFICATION and ... SET EXTERNAL_ACCESS_INTEGRATIONS
+    -- are mutually exclusive clauses (separate statements), so the EAI has to be
+    -- re-asserted here too on every run for the same upgrade-staleness reason.
+    EXECUTE IMMEDIATE 'ALTER SERVICE ' || db_schema || '.MENDIX_DEPLOY_CONTROLLER' ||
+        ' SET EXTERNAL_ACCESS_INTEGRATIONS = (reference(''pg_eai''))';
 
     -- SERVICE_CALLER_TOKEN_VALIDITY_SECS is NOT set here: setting it on a service
     -- requires MANAGE SERVICE CALLER ACCESS on the account, which no application
