@@ -125,6 +125,28 @@ class TestMissingConstants:
         assert err.missing_constants() == []
 
 
+class TestUnknownUserroles:
+    def test_nested_detail_extracts_both_lists(self):
+        err = ControllerError(422, "x", {"detail": {
+            "detail": "Mapping targets userroles not present in the deployed PAD",
+            "unknown_userroles": ["Ghost"],
+            "detected_userroles": ["User", "Administrator"],
+        }})
+        assert err.unknown_userroles() == (["Ghost"], ["User", "Administrator"])
+
+    def test_missing_detected_key_returns_empty_list_not_error(self):
+        err = ControllerError(422, "x", {"detail": {"unknown_userroles": ["Ghost"]}})
+        assert err.unknown_userroles() == (["Ghost"], [])
+
+    def test_string_detail_returns_empty(self):
+        err = ControllerError(422, "x", {"detail": "plain string"})
+        assert err.unknown_userroles() == ([], [])
+
+    def test_non_list_unknown_returns_empty(self):
+        err = ControllerError(422, "x", {"detail": {"unknown_userroles": "not-a-list"}})
+        assert err.unknown_userroles() == ([], [])
+
+
 class TestDetailHelper:
     def test_dict_body_with_detail(self, mock_controller, recording_handler):
         handler = recording_handler(lambda req: httpx.Response(400, json={"detail": "bad request"}))
@@ -159,10 +181,21 @@ class TestEndpointSmokeTests:
     def test_list_apps(self, mock_controller, recording_handler):
         handler = recording_handler(_ok([{"name": "myapp"}]))
         client = mock_controller(handler)
-        result = client.list_apps()
-        assert result == [{"name": "myapp"}]
+        apps, status_unavailable = client.list_apps()
+        assert apps == [{"name": "myapp"}]
+        assert status_unavailable is False
         assert handler.requests[0].method == "GET"
         assert handler.requests[0].url.path == "/apps"
+
+    def test_list_apps_status_unavailable_header(self, mock_controller, recording_handler):
+        handler = recording_handler(
+            lambda req: httpx.Response(200, json=[{"name": "myapp"}],
+                                       headers={"X-Service-Status-Unavailable": "true"})
+        )
+        client = mock_controller(handler)
+        apps, status_unavailable = client.list_apps()
+        assert apps == [{"name": "myapp"}]
+        assert status_unavailable is True
 
     def test_get_app(self, mock_controller, recording_handler):
         handler = recording_handler(_ok({"name": "myapp"}))

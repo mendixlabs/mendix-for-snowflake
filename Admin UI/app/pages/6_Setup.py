@@ -18,12 +18,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from auth import client
-from branding import apply_branding
 from controller_client import ControllerError
 from setup_checks import render_verify_sql
 
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Setup / Verify", layout="wide")
-apply_branding()
 
 try:
     _pg_info = client().get_pg_info()
@@ -69,8 +69,10 @@ st.divider()
 # --- Step 1: network + Postgres instance -------------------------------------
 st.subheader("1 - Postgres instance + network policy")
 st.caption("Credentials in the CREATE output are shown only once - save them.")
-st.code(
-    f"""-- Current SPCS egress IP ranges (feed the CIDRs into the ingress rule below).
+# Plain (non-f) template - .format() is applied on a single line below so a
+# trailing nosec comment can actually attach; bandit's B608 check cannot see a
+# suppression comment placed inside an open triple-quoted f-string.
+_step1_sql = """-- Current SPCS egress IP ranges (feed the CIDRs into the ingress rule below).
 SELECT SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES();
 
 CREATE NETWORK RULE {ingress_rule}
@@ -86,7 +88,9 @@ CREATE POSTGRES INSTANCE {instance}
   STORAGE_SIZE_GB = 10
   AUTHENTICATION_AUTHORITY = POSTGRES
   POSTGRES_VERSION = 17
-  NETWORK_POLICY = '{net_policy}';""",
+  NETWORK_POLICY = '{net_policy}';"""
+st.code(
+    _step1_sql.format(ingress_rule=ingress_rule, net_policy=net_policy, instance=instance),  # nosec B608 - copy-paste instructional text for the operator, never executed here
     language="sql",
 )
 

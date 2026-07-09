@@ -13,11 +13,20 @@ def _list_apps_cached(operator: str, roles: tuple[str, ...]) -> list[dict]:
     # Keyed by (operator, roles): the controller filters by role membership, so
     # the visible set depends on both. Keeping roles in the key keeps it aligned
     # with get_client's cache key.
-    return client().list_apps()
+    apps, status_unavailable = client().list_apps()
+    st.session_state["apps_status_unavailable"] = status_unavailable
+    return apps
 
 
 def list_apps() -> list[dict]:
     return _list_apps_cached(current_operator(), operator_roles())
+
+
+def apps_status_unavailable() -> bool:
+    """True when the service-status query behind the last apps fetch (possibly
+    a cached copy) failed outright - every app's service_status reads None in
+    that response regardless of whether the fleet itself is healthy."""
+    return bool(st.session_state.get("apps_status_unavailable"))
 
 
 def pad_filename(pad_stage_path: str | None) -> str:

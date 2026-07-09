@@ -1,6 +1,34 @@
 from __future__ import annotations
 
+import streamlit as st
+
 import auth as ui_auth
+
+
+class TestOperatorRoles:
+    def test_success_clears_stashed_error(self, monkeypatch):
+        st.session_state.clear()
+        monkeypatch.setattr(ui_auth, "list_operator_roles", lambda: ("ROLE_A",))
+        assert ui_auth.operator_roles() == ("ROLE_A",)
+        assert ui_auth.operator_roles_error() is None
+
+    def test_exception_is_stashed_not_swallowed_silently(self, monkeypatch):
+        st.session_state.clear()
+
+        def _raise():
+            raise RuntimeError("owning application must have at least one CALLER privilege")
+
+        monkeypatch.setattr(ui_auth, "list_operator_roles", _raise)
+        assert ui_auth.operator_roles() == ()
+        assert "CALLER privilege" in ui_auth.operator_roles_error()
+
+    def test_cached_after_first_resolution(self, monkeypatch):
+        st.session_state.clear()
+        calls = []
+        monkeypatch.setattr(ui_auth, "list_operator_roles", lambda: calls.append(1) or ("ROLE_A",))
+        ui_auth.operator_roles()
+        ui_auth.operator_roles()
+        assert len(calls) == 1
 
 
 class TestPrivilegedRolesFn:

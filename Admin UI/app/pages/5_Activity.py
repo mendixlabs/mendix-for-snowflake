@@ -9,12 +9,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from auth import client
-from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
 
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Activity", layout="wide")
-apply_branding()
 st.title("Activity")
 st.caption(
     "Every mutating call recorded by the controller. Includes operator, action, "
@@ -71,6 +71,10 @@ selection = st.dataframe(
     hide_index=True,
     selection_mode="single-row",
     on_select="rerun",
+    column_config={
+        "action": st.column_config.TextColumn("action", width="medium"),
+        "result": st.column_config.TextColumn("result", width="large"),
+    },
     key="activity-dataframe",
 )
 

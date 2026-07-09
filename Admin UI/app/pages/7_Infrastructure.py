@@ -9,11 +9,11 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from auth import client, is_privileged_operator
-from branding import apply_branding
 from controller_client import ControllerError
 
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Infrastructure", layout="wide")
-apply_branding()
 st.title("Infrastructure")
 
 if not is_privileged_operator():

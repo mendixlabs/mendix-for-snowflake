@@ -11,16 +11,43 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from auth import client, operator_roles
-from branding import apply_branding
+from auth import client, operator_roles, operator_roles_error
 from controller_client import ControllerError
-from data import list_apps, pad_filename
+from data import apps_status_unavailable, list_apps, pad_filename
 
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Apps", layout="wide")
-apply_branding()
 st.title("Apps")
 
 _TRANSIENT = {"DEPLOYING", "SUSPENDING", "RESUMING"}
+
+# Secondary visual scan aid alongside the status text (additive - text is never
+# removed). Covers both service_status (Snowflake's live container state) and
+# last_deploy_status (our own last-requested-action record); unrecognized or
+# blank values fall back to no icon rather than a misleading one.
+_STATUS_ICON = {
+    "RUNNING": "🟢",
+    "READY": "🟢",
+    "SUSPENDED": "⚪",
+    "NOT_DEPLOYED": "⚪",
+    "PENDING": "🟡",
+    "DEPLOYING": "🟡",
+    "SUSPENDING": "🟡",
+    "RESUMING": "🟡",
+    "FAILED": "🔴",
+    "INTERNAL_ERROR": "🔴",
+    "DELETING": "🔴",
+}
+
+
+def _status_badge(status: str | None) -> str:
+    """`status` with a leading color icon, for display only - never feed the
+    result back into disable/comparison logic keyed on the raw status string."""
+    if not status:
+        return status or ""
+    icon = _STATUS_ICON.get(status.upper())
+    return f"{icon} {status}" if icon else status
 
 
 def _refresh_now() -> None:
@@ -43,11 +70,11 @@ def _diff_constants(old: dict, new: dict) -> list[str]:
 
 def _render_bulk_result(last: dict) -> None:
     results = last["results"]
-    n_ok = sum(1 for r in results if r["result"] == "OK")
+    n_ok = sum(1 for r in results if r["result"] == "ACCEPTED")
     n_fail = len(results) - n_ok
-    label = f"Last bulk {last['action']}: {n_ok} succeeded, {n_fail} failed."
+    label = f"Last bulk {last['action']}: {n_ok} accepted, {n_fail} rejected."
     if n_fail == 0:
-        st.success(label + " Click Refresh above to update statuses.")
+        st.success(label + " These are async jobs - refresh to see final status.")
     else:
         st.error(label)
     with st.expander("Details"):
@@ -60,11 +87,11 @@ def _run_bulk(names: list[str], action: str, fn) -> None:
     for i, n in enumerate(names):
         try:
             fn(n)
-            results.append({"app": n, "result": "OK", "error": ""})
+            results.append({"app": n, "result": "ACCEPTED", "error": ""})
         except ControllerError as e:
-            results.append({"app": n, "result": "FAILED", "error": str(e)})
+            results.append({"app": n, "result": "REJECTED", "error": str(e)})
         except Exception as e:
-            results.append({"app": n, "result": "FAILED", "error": str(e)})
+            results.append({"app": n, "result": "REJECTED", "error": str(e)})
         progress.progress((i + 1) / len(names), text=f"{action} {i+1}/{len(names)}")
     _refresh_now()
     st.session_state["bulk-last-result"] = {"action": action, "results": results}
@@ -90,6 +117,12 @@ def _apps_table() -> tuple[list[dict], list[int]]:
         st.error(f"Failed to load apps: {e}")
         st.stop()
 
+    if apps_status_unavailable():
+        st.warning(
+            "Could not fetch live service statuses from Snowflake - the statuses "
+            "below may be blank or stale even for a healthy fleet. Try Refresh."
+        )
+
     if not apps:
         st.info("No apps registered yet. Use the Register page to add one.")
         st.stop()
@@ -97,8 +130,8 @@ def _apps_table() -> tuple[list[dict], list[int]]:
     table_rows = [
         {
             "name": a["name"],
-            "service_status": a.get("service_status") or "",
-            "last_deploy_status": a.get("last_deploy_status") or "",
+            "service_status": _status_badge(a.get("service_status")),
+            "last_deploy_status": _status_badge(a.get("last_deploy_status")),
             "endpoint_url": a.get("endpoint_url") or "",
             "pad_file": pad_filename(a.get("pad_stage_path")),
             "last_deployed_at": a.get("last_deployed_at") or "",
@@ -117,7 +150,12 @@ def _apps_table() -> tuple[list[dict], list[int]]:
         selection_mode="multi-row",
         on_select="rerun",
         column_config={
-            "endpoint_url": st.column_config.LinkColumn("endpoint_url"),
+            "endpoint_url": st.column_config.LinkColumn("endpoint_url", width="large"),
+            "pad_file": st.column_config.TextColumn(
+                "pad_file",
+                help="PAD = Portable Application Deployment Archive, Mendix's "
+                     "exported deployment package format.",
+            ),
         },
         key="apps-dataframe",
     )
@@ -142,8 +180,10 @@ def _detail_panel(selected_name: str) -> None:
 
     st.subheader(selected_name)
     c1, c2, c3 = st.columns(3)
-    c1.metric("Service status", svc_status)
-    c2.metric("Deploy status", deploy_status)
+    # Badge the displayed text only - svc_status/deploy_status themselves keep
+    # driving the disabled= checks on the action buttons below.
+    c1.metric("Service status", _status_badge(svc_status))
+    c2.metric("Deploy status", _status_badge(deploy_status))
     c3.metric("Resource tier", record.get("resource_tier") or "")
     st.caption(
         "Service status is Snowflake's live container state - it can show `PENDING` "
@@ -181,15 +221,22 @@ def _detail_panel(selected_name: str) -> None:
                 else:
                     st.error(str(e))
     with action_cols[1]:
-        if st.button("Suspend", key=f"suspend-{selected_name}",
-                     disabled=svc_status == "SUSPENDED" or deploy_status in _TRANSIENT,
-                     use_container_width=True):
-            try:
-                client().suspend(selected_name)
-                _refresh_now()
-                st.rerun()
-            except ControllerError as e:
-                st.error(str(e))
+        # Suspend causes real downtime, so it gets the same warn-then-confirm
+        # popover as bulk suspend below, instead of firing on a single click.
+        with st.popover("Suspend", use_container_width=True,
+                         disabled=svc_status == "SUSPENDED" or deploy_status in _TRANSIENT):
+            st.warning(
+                f"This will suspend `{selected_name}`. Its endpoint "
+                f"({record.get('endpoint_url') or '(none)'}) will become unreachable "
+                "until resumed."
+            )
+            if st.button("Confirm suspend", key=f"suspend-go-{selected_name}", type="primary"):
+                try:
+                    client().suspend(selected_name)
+                    _refresh_now()
+                    st.rerun()
+                except ControllerError as e:
+                    st.error(str(e))
     with action_cols[2]:
         if st.button("Resume", key=f"resume-{selected_name}",
                      disabled=svc_status == "RUNNING" or deploy_status in _TRANSIENT,
@@ -373,6 +420,15 @@ def _detail_panel(selected_name: str) -> None:
             if len(available_roles) > len(shown_roles):
                 roles_line += f" (+{len(available_roles) - len(shown_roles)} more)"
             st.caption(roles_line)
+        else:
+            _roles_err = operator_roles_error()
+            if _roles_err:
+                st.caption(
+                    "Could not resolve your available Snowflake roles - this usually means "
+                    "Setup step 5b's caller-token specification has not been approved yet."
+                )
+                with st.expander("Why?"):
+                    st.code(_roles_err)
 
         current_mapping = record.get("role_mapping") or {}
         rolemap_key = f"rolemap-{selected_name}"
@@ -443,7 +499,16 @@ def _detail_panel(selected_name: str) -> None:
                 st.success("Role mapping saved. Service is restarting.")
                 st.rerun()
             except ControllerError as e:
-                st.error(str(e))
+                unknown, detected = e.unknown_userroles()
+                if unknown:
+                    st.error(
+                        "Mapping targets userroles not present in the deployed PAD: "
+                        + ", ".join(f"`{r}`" for r in unknown)
+                        + ". Detected userroles: "
+                        + (", ".join(f"`{r}`" for r in detected) if detected else "(none)")
+                    )
+                else:
+                    st.error(str(e))
 
         if current_mapping:
             st.caption(

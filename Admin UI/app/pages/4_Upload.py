@@ -1,4 +1,4 @@
-"""Deploy page: stage a Mendix PAD and trigger a deploy.
+"""Upload PAD page: stage a Mendix PAD and trigger a deploy.
 
 Browser uploads can't carry production PADs: a Mendix PAD bundles the runtime
 and routinely runs to hundreds of MB, which exceeds what the SPCS ingress accepts
@@ -18,13 +18,13 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 
 from auth import client
-from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
 
-st.set_page_config(page_title="Deploy PAD", layout="centered")
-apply_branding()
-st.title("Deploy a PAD")
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
+st.set_page_config(page_title="Upload PAD", layout="centered")
+st.title("Upload PAD")
 
 st.caption(
     "Mendix PADs are large (hundreds of MB), so they cannot be uploaded through the "
@@ -43,7 +43,12 @@ if not apps:
     st.stop()
 
 names = [a["name"] for a in apps]
-selected = st.selectbox("App", names)
+selected = st.selectbox(
+    "App",
+    names,
+    help="PAD = Portable Application Deployment Archive, Mendix's exported "
+         "deployment package format. Pick which app receives the staged PAD.",
+)
 
 # The deploy stage FQN is injected into the container by the setup script
 # (it depends on the consumer's application database name). Fall back to a

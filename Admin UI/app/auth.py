@@ -89,9 +89,22 @@ def operator_roles() -> tuple[str, ...]:
     if "operator_roles" not in st.session_state:
         try:
             st.session_state["operator_roles"] = list_operator_roles()
-        except Exception:
+            st.session_state["operator_roles_error"] = None
+        except Exception as e:
             st.session_state["operator_roles"] = ()
+            st.session_state["operator_roles_error"] = str(e)
     return st.session_state["operator_roles"]
+
+
+def operator_roles_error() -> str | None:
+    """The exception message (if any) swallowed by the last role resolution.
+
+    None means resolution either succeeded or simply found no caller token
+    (the service not running with executeAsCaller) - not an error worth
+    surfacing. A non-None value is almost always Setup step 5b's caller-token
+    specification not being approved yet.
+    """
+    return st.session_state.get("operator_roles_error")
 
 
 def _privileged_roles() -> frozenset[str]:

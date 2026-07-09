@@ -10,13 +10,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from auth import client, is_privileged_operator
-from branding import apply_branding
 from controller_client import ControllerError
 from data import list_apps
 from log_status import LARGE_LINES_THRESHOLD, LOG_LINES_HARD_CAP, classify_log_fetch_failure
 
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Logs", layout="wide")
-apply_branding()
 st.title("Service logs")
 
 # Infrastructure services, shown only to privileged operators. Each entry is

@@ -28,6 +28,21 @@ class ControllerError(Exception):
             return [str(m) for m in detail["missing"]]
         return []
 
+    def unknown_userroles(self) -> tuple[list[str], list[str]]:
+        """(unknown, detected) userroles from a 422 role-mapping save.
+
+        Mirrors missing_constants(): the controller raises HTTPException(detail=
+        {"detail": ..., "unknown_userroles": [...], "detected_userroles": [...]}).
+        Returns ([], []) when the body doesn't match this shape.
+        """
+        detail = self.body.get("detail")
+        if isinstance(detail, dict) and isinstance(detail.get("unknown_userroles"), list):
+            return (
+                [str(r) for r in detail["unknown_userroles"]],
+                [str(r) for r in detail.get("detected_userroles", [])],
+            )
+        return ([], [])
+
 
 def _detail(response: httpx.Response) -> str:
     try:
@@ -73,8 +88,15 @@ class ControllerClient:
             raise ControllerError(r.status_code, _detail(r), body if isinstance(body, dict) else None)
         return r
 
-    def list_apps(self) -> list[dict]:
-        return self._request("GET", "/apps").json()
+    def list_apps(self) -> tuple[list[dict], bool]:
+        """(apps, status_unavailable).
+
+        status_unavailable is True when the controller's own service-status
+        query failed outright, distinct from a genuinely quiet fleet - every
+        app's service_status reads None in the response either way.
+        """
+        r = self._request("GET", "/apps")
+        return r.json(), r.headers.get("X-Service-Status-Unavailable") == "true"
 
     def get_app(self, name: str) -> dict:
         return self._request("GET", f"/apps/{name}").json()

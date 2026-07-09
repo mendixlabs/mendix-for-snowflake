@@ -10,12 +10,12 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from auth import client, operator_roles
-from branding import apply_branding
+from auth import client, operator_roles, operator_roles_error
 from controller_client import ControllerError
 
+# apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
+# so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Register", layout="centered")
-apply_branding()
 st.title("Register a new app")
 
 _DEFAULT_OWNER_ROLE = "MENDIX_ADMIN_OPERATOR_ROLE"
@@ -26,7 +26,9 @@ _owner_candidates = [
 
 st.caption(
     "Creates the SPCS service, filestorage stage, and PG/admin secrets. "
-    "Upload the PAD afterward via the Upload page (`snow stage copy`), then Redeploy on the Apps page."
+    "Upload the PAD (Portable Application Deployment Archive, Mendix's exported "
+    "deployment package) afterward via the Upload PAD page (`snow stage copy`), "
+    "then Redeploy on the Apps page."
 )
 
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -43,7 +45,8 @@ with st.form("register"):
     admin_password = st.text_input(
         "MxAdmin password",
         type="password",
-        help="Stored as a Snowflake secret and mounted into the service.",
+        help="MxAdmin is Mendix's built-in runtime admin API. Its password is "
+             "stored as a Snowflake secret and mounted into the service.",
     )
     resource_tier = st.selectbox(
         "Resource tier",
@@ -63,10 +66,20 @@ with st.form("register"):
             help="Operators holding this role will see and manage the app.",
         )
     else:
-        st.warning(
-            "Could not resolve your Snowflake roles; the app will be owned by "
-            f"`{_DEFAULT_OWNER_ROLE}`."
-        )
+        _roles_err = operator_roles_error()
+        if _roles_err:
+            st.warning(
+                "Could not resolve your Snowflake roles; the app will be owned by "
+                f"`{_DEFAULT_OWNER_ROLE}`. This usually means Setup step 5b's caller-token "
+                "specification has not been approved yet - see the Setup page."
+            )
+            with st.expander("Why?"):
+                st.code(_roles_err)
+        else:
+            st.warning(
+                "Could not resolve your Snowflake roles; the app will be owned by "
+                f"`{_DEFAULT_OWNER_ROLE}`."
+            )
         owner_role = _DEFAULT_OWNER_ROLE
     constants_text = st.text_area(
         "Constants (JSON object, optional)",
