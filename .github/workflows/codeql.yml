@@ -1,6 +1,8 @@
-# CodeQL static analysis for the Python services (Controller, Admin UI).
-# Complements security-scan.yml's Bandit job with GitHub's semantic SAST engine;
-# findings land in the repository Security tab.
+# CodeQL static analysis for the Python services (Controller, Admin UI) and the
+# Java SnowflakeSSO Mendix module (App Components) - the SSO/role-mapping trust
+# boundary, including operator-controlled XPath, was previously unscanned by
+# any static analysis. Complements security-scan.yml's Bandit job with GitHub's
+# semantic SAST engine; findings land in the repository Security tab.
 
 name: codeql
 
@@ -24,7 +26,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  analyze:
+  analyze-python:
     name: codeql (python)
     runs-on: ubuntu-latest
     steps:
@@ -32,4 +34,21 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: python
+      - uses: github/codeql-action/analyze@v4
+
+  analyze-java:
+    name: codeql (java)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          # App Components/Source is raw Mendix module source (no pom.xml/build.gradle,
+          # and the com.mendix.* runtime classes it depends on aren't vendored here),
+          # so there is no working classpath to compile against. build-mode: none runs
+          # CodeQL's source-only extraction instead of invoking (and failing) a build -
+          # it still catches source-level security queries (e.g. XPath injection) at
+          # the cost of missing anything that needs resolved byte-code/type info.
+          build-mode: none
       - uses: github/codeql-action/analyze@v4

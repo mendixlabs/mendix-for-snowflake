@@ -89,7 +89,7 @@ jobs:
         # --provenance only matters for the registry push, not a local scan.
         run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
       - name: Trivy scan (full report, SARIF)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ matrix.image }}:scan'
           format: sarif
@@ -101,7 +101,7 @@ jobs:
           sarif_file: trivy-${{ matrix.image }}.sarif
           category: trivy-${{ matrix.image }}
       - name: Trivy gate (fail on CRITICAL/HIGH)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ matrix.image }}:scan'
           format: table
@@ -131,8 +131,12 @@ jobs:
         with:
           sarif_file: bandit.sarif
           category: bandit-${{ matrix.service }}
-      - name: Bandit gate (fail on HIGH severity)
-        run: bandit -r "${{ matrix.service }}/app" --severity-level high
+      - name: Bandit gate (fail on MEDIUM/HIGH severity)
+        # MEDIUM catches SQL-shaped findings (B608) central to this codebase's
+        # parameterized-query discipline - HIGH-only let those slip through green.
+        # Existing accepted-low-risk B608 hits (fixed-name tables/allow-listed
+        # columns, always parameterized values) carry a reviewed nosec comment.
+        run: bandit -r "${{ matrix.service }}/app" --severity-level medium
 
   secret-scan:
     name: trivy secrets (repo)
@@ -140,7 +144,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Trivy secret scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: '.'
@@ -195,3 +199,29 @@ jobs:
       - name: Shellcheck entrypoint.sh
         # shellcheck is preinstalled on ubuntu-latest runners.
         run: shellcheck "Mendix Base Image/entrypoint.sh"
+
+  psscriptanalyzer:
+    name: PSScriptAnalyzer (*.ps1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint PowerShell scripts
+        # pwsh + PSScriptAnalyzer's default module set are preinstalled on
+        # ubuntu-latest runners. setup_script.sql has no equivalent linter here -
+        # this job covers the PowerShell half of that gap only.
+        #
+        # PSAvoidUsingWriteHost is excluded: every script here is an interactive
+        # deployment tool a human runs directly, where Write-Host's console-only
+        # output is the correct choice, not the redirectable-pipeline output the
+        # rule assumes. Gating on it would fail every run on a non-issue.
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse -Filter *.ps1 -Path native-app/scripts, "App Components/scripts"
+          $results = $files | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_.FullName -Severity Warning,Error -ExcludeRule PSAvoidUsingWriteHost
+          }
+          $results | Format-Table -AutoSize
+          if ($results.Count -gt 0) {
+            Write-Error "PSScriptAnalyzer found $($results.Count) warning(s)/error(s)."
+            exit 1
+          }

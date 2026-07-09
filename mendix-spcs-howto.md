@@ -208,9 +208,20 @@ for `PRIVILEGED_ROLES` members.
 | `DELETE /apps/{name}/role-mapping` | Clear the role mapping, revert to the default userrole (202, restarts) |
 | `POST /apps/{name}/suspend` / `resume` | Suspend or resume the service (202) |
 | `DELETE /apps/{name}` | Drop the service, access role, per-app secrets, and registry row |
-| `GET /apps/{name}/logs` | App container logs |
+| `GET /apps/{name}/logs` | App container logs (tail, up to 1000 lines) |
+| `POST /apps/{name}/logs/download` | Start a background export of the full log history (202, async) |
+| `GET /apps/{name}/logs/download/{job_id}` | Poll a log-download job; returns the log text once ready |
 | `GET /activity` | Audit log (scoped to the caller's apps) |
-| `GET /system/logs/{target}`, `GET`/`PATCH /system/compute-pool` | Infrastructure (privileged roles only) |
+| `GET /system/logs/{target}`, `POST /system/logs/{target}/download`, `GET /system/logs/{target}/download/{job_id}` | Same tail/download pair for an infrastructure service (`controller` or `admin-ui`; privileged roles only) |
+| `GET /system/compute-pool`, `PATCH /system/compute-pool` | Read/resize the shared compute pool (privileged roles only) |
+| `GET /system/pg-info` | Shared Postgres host/port for diagnostics (privileged roles only) |
+
+Verb note: every `/apps/{name}/*` partial update uses `PUT` (replace-the-field semantics: you send
+the full new value for that field, not a delta) except `/system/compute-pool`, which uses `PATCH`
+(you send only the subset of `min_nodes`/`max_nodes`/`auto_suspend_secs` you want to change - the
+rest keep their current values). Both send partial documents in practice; the difference reflects
+when each route was written, not a deliberate REST convention. Match whichever the route you're
+calling actually uses - the table above is the source of truth.
 
 **CI/CD deploy recipe** — mirror of what the admin UI does:
 

@@ -92,7 +92,10 @@ if ($createExit -ne 0) {
 Write-Host "[3/4] Versions in $pkg :" -ForegroundColor Cyan
 $showJson = & snow sql -q "SHOW VERSIONS IN APPLICATION PACKAGE $pkg" --connection $conn --format json
 $rows = $null
-try { $rows = $showJson | ConvertFrom-Json } catch {}
+# Best-effort: if the CLI's output isn't valid JSON (rare, and only affects this
+# summary display), fall through to $rows = $null - the "if ($rows)" check below
+# skips the summary rather than failing the release itself.
+try { $rows = $showJson | ConvertFrom-Json } catch { Write-Verbose "Could not parse SHOW VERSIONS output as JSON: $_" }
 $reviewStatus = $null
 if ($rows) {
     foreach ($r in $rows) {

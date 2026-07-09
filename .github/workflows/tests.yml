@@ -42,11 +42,16 @@ jobs:
             requirements: Controller/requirements.txt
             tests: Controller/tests
             cov: Controller/app
+            # Currently ~95%; the floor is a regression backstop (e.g. a file's tests
+            # silently dropping to 0%), not a target - keep well above it, not at it.
+            cov_fail_under: '90'
           - service: Admin UI
             slug: admin-ui
             requirements: Admin UI/requirements.txt
             tests: Admin UI/tests
             cov: Admin UI/app
+            # Currently ~82% (pages/* is coverage-omitted by design; see pyproject.toml).
+            cov_fail_under: '75'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -67,6 +72,7 @@ jobs:
           "--cov=${{ matrix.cov }}"
           --cov-report=term-missing
           "--cov-report=xml:coverage-${{ matrix.slug }}.xml"
+          "--cov-fail-under=${{ matrix.cov_fail_under }}"
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7
