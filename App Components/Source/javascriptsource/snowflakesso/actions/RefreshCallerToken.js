@@ -10,6 +10,12 @@ import { Big } from "big.js";
 
 // BEGIN EXTRA CODE
 let refreshInterval = null;
+let visibilityListenerAttached = false;
+let lastRefreshAtMillis = 0;
+const REFRESH_INTERVAL_MILLIS = 20 * 60 * 1000;
+// Suppress a visibility-triggered refresh if one just happened - avoids a burst
+// of redundant calls from rapid tab-switching or duplicate visibilitychange events.
+const MIN_MILLIS_BETWEEN_REFRESHES = 60 * 1000;
 // END EXTRA CODE
 
 /**
@@ -18,6 +24,7 @@ let refreshInterval = null;
 export async function RefreshCallerToken() {
 	// BEGIN USER CODE
 	const doRefresh = async () => {
+		lastRefreshAtMillis = Date.now();
 		try {
 			const response = await fetch("/headersso/refresh", {
 				method: "GET",
@@ -32,7 +39,25 @@ export async function RefreshCallerToken() {
 
 	// Schedule recurring refresh every 20 minutes (only one interval active)
 	if (refreshInterval === null) {
-		refreshInterval = setInterval(doRefresh, 20 * 60 * 1000);
+		refreshInterval = setInterval(doRefresh, REFRESH_INTERVAL_MILLIS);
+	}
+
+	// The fixed interval above stops firing reliably once the tab is backgrounded
+	// (browsers throttle timers in inactive tabs), so a user who tabs away for
+	// longer than the server-side cache's TTL and comes back would otherwise find
+	// their caller token already evicted. Catch that up by refreshing immediately
+	// whenever the tab becomes visible again, not just waiting for the next tick.
+	if (!visibilityListenerAttached) {
+		visibilityListenerAttached = true;
+		document.addEventListener("visibilitychange", () => {
+			if (document.visibilityState !== "visible") {
+				return;
+			}
+			if (Date.now() - lastRefreshAtMillis < MIN_MILLIS_BETWEEN_REFRESHES) {
+				return;
+			}
+			doRefresh();
+		});
 	}
 
 	// Execute immediately on first call
