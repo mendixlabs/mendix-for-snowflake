@@ -108,7 +108,7 @@ st.caption("Status is fetched on page load and after each action. Click Refresh 
 
 
 @st.fragment(run_every=10 if auto else None)
-def _apps_table() -> tuple[list[dict], list[int]]:
+def _apps_table() -> None:
     if auto:
         _refresh_now()
     try:
@@ -160,10 +160,29 @@ def _apps_table() -> tuple[list[dict], list[int]]:
         key="apps-dataframe",
     )
     selected_rows = selection.selection.rows if selection and selection.selection else []
-    return table_rows, selected_rows
 
+    # Dispatch the detail/bulk panel from inside this same fragment. The dataframe's
+    # on_select="rerun" only triggers a fragment-scoped rerun (this function re-running
+    # in isolation), never a full top-to-bottom script rerun - code that consumed
+    # selected_rows/table_rows from module scope below this fragment never saw a fresh
+    # selection until some OUTER widget (Refresh, Auto-refresh) forced a full rerun.
+    if not selected_rows:
+        st.caption(
+            "Select one row for a detail panel. Select two or more for bulk actions."
+        )
+        last_result = st.session_state.get("bulk-last-result")
+        if last_result:
+            _render_bulk_result(last_result)
+        return
 
-table_rows, selected_rows = _apps_table()
+    st.divider()
+
+    if len(selected_rows) == 1:
+        selected_name = table_rows[selected_rows[0]]["name"]
+        _detail_panel(selected_name)
+    else:
+        selected_names = [table_rows[i]["name"] for i in selected_rows]
+        _bulk_panel(apps, selected_names)
 
 
 @st.fragment
@@ -605,7 +624,7 @@ def _detail_panel(selected_name: str) -> None:
 
 
 @st.fragment
-def _bulk_panel(names: list[str]) -> None:
+def _bulk_panel(apps: list[dict], names: list[str]) -> None:
     selected_apps = [a for a in apps if a["name"] in names]
     st.subheader(f"Bulk actions — {len(names)} apps selected")
     st.write("Selected: " + ", ".join(f"`{n}`" for n in names))
@@ -659,20 +678,12 @@ def _bulk_panel(names: list[str]) -> None:
         _render_bulk_result(last_result)
 
 
-if not selected_rows:
-    st.caption(
-        "Select one row for a detail panel. Select two or more for bulk actions."
-    )
-    last_result = st.session_state.get("bulk-last-result")
-    if last_result:
-        _render_bulk_result(last_result)
-    st.stop()
+# Called only here, at the true end of the module, after every function it can
+# reach (_detail_panel, _bulk_panel, _render_bulk_result) is already defined.
+# _apps_table's body calls _detail_panel/_bulk_panel by name at run time - if this
+# call sat any earlier in the file (as it briefly did), a full top-to-bottom
+# script rerun (e.g. toggling Auto-refresh with a row already selected) would
+# reach this line before the script had executed the def statements below it,
+# raising NameError. See the live-found bug this fixed.
+_apps_table()
 
-st.divider()
-
-if len(selected_rows) == 1:
-    selected_name = table_rows[selected_rows[0]]["name"]
-    _detail_panel(selected_name)
-else:
-    selected_names = [table_rows[i]["name"] for i in selected_rows]
-    _bulk_panel(selected_names)
