@@ -391,7 +391,8 @@ def _teardown_app_objects(name: str, service_name: str, app_schema: str,
 
 
 @app.post("/apps", status_code=status.HTTP_201_CREATED)
-def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
+def create_app(req: CreateAppRequest, background_tasks: BackgroundTasks,
+               roles: set[str] = Depends(caller_roles)):
     if not auth.authorize(req.owner_role, roles):
         raise HTTPException(
             status_code=403,
@@ -498,6 +499,32 @@ def create_app(req: CreateAppRequest, roles: set[str] = Depends(caller_roles)):
         else:
             detail += "; created objects were rolled back"
         raise HTTPException(status_code=502, detail=detail) from exc
+
+    # The service was just created against the pre-deploy placeholder spec
+    # (PAD_STAGE_PATH = apps/{name}/current.zip), which only exists if the
+    # operator's real PAD happens to be named that. If a PAD was already
+    # staged under this app's real name before Register was clicked - the
+    # normal order once staging uses `snow stage copy` with the operator's
+    # own filename - deploy it immediately instead of leaving the service to
+    # crash-loop against the placeholder until a separate manual Redeploy.
+    # Uses the identical _prepare_deploy/_run_deploy path trigger_deploy uses,
+    # so pad_stage_path/user_roles/constants end up populated the same way
+    # regardless of whether staging happened before or after registration.
+    # Failure here (e.g. the PAD declares constants with no value yet) is not
+    # fatal to registration - it leaves the app NOT_DEPLOYED, exactly like the
+    # stage-after-register order, and the operator resolves it with a manual
+    # Redeploy the same way trigger_deploy's own callers already do.
+    staged_pad = _resolve_staged_pad(req.name)
+    if staged_pad:
+        try:
+            record, pad_constants, new_constants, user_roles = _prepare_deploy(req.name, staged_pad)
+            registry.update_app(req.name, {"last_deploy_status": "DEPLOYING"})
+            background_tasks.add_task(
+                _run_deploy, req.name, staged_pad, record, pad_constants, new_constants, user_roles
+            )
+            return {"service_name": service_name, "status": "DEPLOYING"}
+        except Exception:
+            logger.exception("Auto-deploy of already-staged PAD failed for %s", req.name)
 
     return {"service_name": service_name, "status": "NOT_DEPLOYED"}
 

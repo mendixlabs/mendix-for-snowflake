@@ -121,6 +121,49 @@ class TestCreateAppHappyPath:
         assert "TESTDB.MXAPP_MYAPP.MX_LICENSE_KEY" not in secret_names
         assert fake_registry.get_app("myapp").license_id is None
 
+
+class TestCreateAppAutoDeploy:
+    """A PAD staged before Register (the normal `snow stage copy` -> Register
+    order once staging uses the operator's own filename, not current.zip)
+    deploys immediately instead of leaving the service to crash-loop against
+    the pre-deploy current.zip placeholder until a separate manual Redeploy."""
+
+    def test_staged_pad_deploys_immediately(self, client, fake_sf, fake_registry, fake_pg_admin,
+                                            role_headers, staged_pad, make_pad_zip):
+        zpath = make_pad_zip(extra_defaults={"Mod.A": "value_a"})
+        staged_pad("myapp", src_zip=zpath, filename="MyExport_20260101.zip")
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),
+                           json=_create_payload(constants={"Mod.A": "value_a"}))
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "DEPLOYING"
+
+        assert fake_sf.calls_for("alter_service_spec"), "spec should rebuild against the real staged PAD"
+        record = fake_registry.get_app("myapp")
+        assert record.last_deploy_status == "READY"
+        assert record.pad_stage_path == "apps/myapp/MyExport_20260101.zip"
+
+    def test_no_staged_pad_stays_not_deployed(self, client, fake_sf, fake_registry, fake_pg_admin,
+                                              role_headers, staged_pad):
+        # staged_pad fixture only points DEPLOY_STAGE_MOUNT at tmp_path; no zip
+        # is copied in here, matching the normal register-then-stage order.
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload())
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "NOT_DEPLOYED"
+        assert not fake_sf.calls_for("alter_service_spec")
+
+    def test_staged_pad_with_missing_constant_leaves_not_deployed(
+        self, client, fake_sf, fake_registry, fake_pg_admin, role_headers, staged_pad, make_pad_zip
+    ):
+        zpath = make_pad_zip(defaults_text='"New.Const" = ""', variables_text='"New.Const" = ${?NEW_CONST}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps", headers=role_headers("PRIV_ROLE"), json=_create_payload(constants={}))
+        # Registration itself still succeeds; only the immediate auto-deploy
+        # attempt is declined (missing-constant 422 from _prepare_deploy), same
+        # outcome as the stage-after-register order that requires a manual Redeploy.
+        assert resp.status_code == 201
+        assert resp.json()["status"] == "NOT_DEPLOYED"
+        assert fake_registry.get_app("myapp").last_deploy_status == "NOT_DEPLOYED"
+
     def test_exactly_one_license_field_422(self, client, role_headers):
         resp = client.post("/apps", headers=role_headers("PRIV_ROLE"),
                            json=_create_payload(license_id="LIC-1"))
