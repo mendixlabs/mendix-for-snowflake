@@ -2,15 +2,16 @@
 
 ## Reporting a vulnerability
 
-Report vulnerabilities through Siemens ProductCERT's vulnerability handling and disclosure
-process: https://www.siemens.com/global/en/products/services/cert/vulnerability-process.html.
-Alternatively, email security@mendix.com.
+This repository is a personal open-source project, not an official Mendix or Siemens
+product.
 
-To reach the maintainer of this repository directly and fastest, open a GitHub issue:
-https://github.com/mendixlabs/mendix-for-snowflake/issues. For a sensitive
-finding you would rather not disclose in the open, use GitHub's private vulnerability
-reporting on the repository's Security tab instead, which reaches the maintainer just as
-quickly without a public issue.
+Report vulnerabilities through GitHub's private vulnerability reporting on this
+repository's Security tab:
+https://github.com/mendixlabs/mendix-for-snowflake/security/advisories/new. This reaches
+the maintainer directly without public disclosure.
+
+For findings that are not sensitive, opening a regular GitHub issue also works:
+https://github.com/mendixlabs/mendix-for-snowflake/issues.
 
 ## Automated security scanning
 
@@ -88,19 +89,3 @@ for the container process's own lifetime, and expires after a short TTL well und
 real validity window. A container restart or cache expiry simply requires the user to log back
 in - it does not degrade to a stored, at-rest credential the way an earlier version of this
 module did.
-
-## Organizational context
-
-This application is developed by a Siemens business (Mendix). For broader context, Siemens (our
-parent company) holds a TÜV SÜD IEC 62443-4-1 certification covering the secure development
-lifecycle of certain of its product lines, and Mendix publishes a platform-level secure
-development lifecycle that includes mandatory peer review, Snyk software composition analysis,
-Veracode SAST, SonarQube quality gates, and monthly external penetration tests:
-https://www.mendix.com/evaluation-guide/security/secure-development-lifecycle/.
-
-Those are organizational and platform-level controls provided for context. The Siemens IEC
-62443-4-1 certification is scoped to specific Siemens product lines and does not itself cover
-this repository, and the Mendix platform controls govern the Mendix product platform, not this
-repository. This repository has a single maintainer and does not itself go through the
-platform's peer review, Snyk, Veracode, SonarQube, or penetration testing. What governs this
-repository is the automated CI pipeline and best-effort remediation described above.
