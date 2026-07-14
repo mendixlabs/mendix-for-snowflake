@@ -27,8 +27,8 @@ The Streamlit admin UI manages apps from a browser, themed to Siemens iX:
 A Snowflake Native App with Containers that runs Mendix apps on SPCS inside the consumer's own account:
 
 - **Native App packaging** (`native-app/`) - Manifest, `setup_script.sql` (creates the deploy stage, app registry, callbacks, and both services at install), listing config, and the release tooling (`scripts/build-and-push.ps1`, `scripts/release.ps1`).
-- **Controller** (`Controller/`) - A FastAPI service, owned and started by the app, that manages the full app lifecycle: provisioning per-app services, storing constants as Snowflake secrets, and deploying new PAD versions without Docker rebuilds per app.
-- **Admin UI** (`Admin UI/`) - Streamlit admin frontend running as a sibling app-owned service. Calls the controller over internal SPCS DNS and lets operators manage apps from a browser. Pages: app status and lifecycle (deploy, suspend, resume, delete), PAD upload, constants editor, logs, activity audit log, and a privileged Infrastructure page for compute pool resize. Multi-tenant: each app carries an `owner_role` and operators see only apps owned by roles they hold.
+- **Controller** (`Controller/`) - A FastAPI service, owned and started by the app, that manages the full app lifecycle: provisioning per-app services, storing constants as Snowflake secrets, deploying new PAD versions without Docker rebuilds per app, recording deploy history for rollback, and watching SPCS egress IP expiry.
+- **Admin UI** (`Admin UI/`) - Streamlit admin frontend running as a sibling app-owned service. Calls the controller over internal SPCS DNS and lets operators manage apps from a browser. Pages: app status and lifecycle (deploy, suspend, resume, delete) with live progress captions, failure reasons, deploy history with rollback, and per-app health; PAD upload, constants editor, per-app external access integrations, logs, activity audit log, a Setup page for Postgres, EAI, and egress-alert configuration, and a privileged Infrastructure page for compute pool resize and egress IP expiry. Apps flagged after a platform upgrade show an "Apply platform update" action, per-app or fleet-wide. Multi-tenant: each app carries an `owner_role` and operators see only apps owned by roles they hold.
 - **Mendix Base Image** (`Mendix Base Image/`) - A generic Mendix runner image. Built once and shared across all apps. No app code baked in — the app is loaded from the stage at container startup.
 - **SnowflakeSSO module** (`App Components/`) - Mendix module that reads the `Sf-Context-Current-User` header injected by SPCS, auto-logs users in using their Snowflake identity, and captures the caller token for querying Snowflake data as the end user.
 - **[native-app/HOW-TO-PUBLISH.md](native-app/HOW-TO-PUBLISH.md)** - Provider runbook: build, version, validate, release.
@@ -75,8 +75,9 @@ flowchart TB
   gated by a Snowflake caller token; the Admin UI → Controller hop additionally requires a shared
   `INTERNAL_AUTH_TOKEN` generated at install.
 - **Per-app Mendix services** (one per registered app) are the only components with external
-  egress — scoped to the consumer's own Postgres `host:port` via the bound `pg_eai` reference, no
-  broader network access.
+  egress: the bound `pg_eai` reference (Postgres `host:port`) is always attached, plus up to four
+  optional per-app External Access Integrations (`app_eai_1`-`app_eai_4`) the consumer can bind and
+  attach per app for other egress needs.
 - **Consumer Snowflake data access** uses Snowflake's two-layer restricted caller's-rights model:
   a query succeeds only when both the application object and the calling end user hold the grant.
 - See [native-app/HOW-TO-PUBLISH.md](native-app/HOW-TO-PUBLISH.md) for the release/install runbook
@@ -129,6 +130,8 @@ snow stage copy "C:\path\to\MyApp_portable_20261201.zip" `
 
 No Docker build and no new app registration. Export a new PAD from Studio Pro, stage it to the same `apps/<name>/` path (the newest zip wins), and click **Redeploy** in the Admin UI.
 
+If a deploy fails, the Apps page shows the reason. The History expander (last 20 recorded operations per app) lets you roll back to the last successful deploy or any earlier entry in that list; rollback restores deployment configuration only, not constant values, since constants are stored as secrets and never snapshotted.
+
 Deploys can also be scripted: everything the Admin UI does goes through the controller's REST API (`snow stage copy` + `POST /apps/{name}/trigger-deploy` + poll), so CI/CD pipelines can drive it directly — see [mendix-spcs-howto.md](mendix-spcs-howto.md#automating-the-controller-rest-api--ci-cd).
 
 ## Querying Snowflake Data
@@ -146,14 +149,15 @@ an app drops its schema, including these files.
 
 ## Cost
 
-SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs 0.11 credits/hour. The app's compute pool auto-suspends when all services are suspended (`AUTO_SUSPEND_SECS = 3600`); suspend and resume apps from the Admin UI, and resize the pool on its Infrastructure page.
+SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs 0.11 credits/hour. The app's compute pool auto-suspends when all services are suspended (`AUTO_SUSPEND_SECS = 3600`); suspend and resume apps from the Admin UI, and resize the pool on its Infrastructure page. The Apps page only auto-refreshes while a deploy, suspend, or resume is in flight, or when the operator turns it on, so the query warehouse behind the fleet list idles otherwise.
 
 ## Known Limitations
 
 - SPCS endpoints get a fixed `<hash>-<account>.snowflakecomputing.app` URL — no custom domains
-- Snowflake Postgres network policy must be updated when SPCS egress IP ranges rotate (current expiry: 2026-09-07)
+- Snowflake Postgres network policy must be updated when SPCS egress IP ranges rotate; the app now checks expiry daily and warns in the Admin UI (Apps page banner, Infrastructure page detail, optional email alerts), but the consumer must still run the regenerated fix-up SQL, since the rotation itself is not automatic (current expiry: 2026-09-07)
 - Apps run trial-licensed (6 concurrent users, restarts every 2-4 hours) until a Mendix license is set per app in the Admin UI; license validation is offline
 - Caller's rights tokens expire after 30 minutes; the SnowflakeSSO refresh snippet must be present in the Main Layout
 - End-users can be given a per-app Mendix userrole based on their Snowflake account roles (Admin UI role mapping), but this requires caller's rights and only account roles are detectable, not application roles
+- Per-app external access is capped at four optional integration slots (`app_eai_1`-`app_eai_4`); Snowflake does not support multi-valued EAI references, so more egress targets need more slots in a future release
 
 See [mendix-spcs-caveats-and-ideas.md](mendix-spcs-caveats-and-ideas.md) for the full list.

@@ -315,6 +315,67 @@ st.warning(
     "roughly a 30-minute lag when adding data access to an already-running app."
 )
 
+# --- Step 7: optional per-app egress integrations (app_eai_1..4) ------------
+st.subheader("7 - Optional: per-app egress integrations")
+st.caption(
+    "Deployed Mendix apps have no outbound network access beyond Postgres by "
+    "default. To let one call another API, bind one of the four optional "
+    "app_eai_1..4 reference slots to an integration created here, then attach "
+    "the app to that slot on the Apps page (existing apps) or Register page "
+    "(new apps). Unlike pg_eai above, these are general-purpose egress, not "
+    "tied to any bound secret - allowed_secrets is NONE, not LIST."
+)
+eai_c1, eai_c2 = st.columns(2)
+with eai_c1:
+    app_eai_slot = st.selectbox("Slot", options=["app_eai_1", "app_eai_2", "app_eai_3", "app_eai_4"])
+    app_eai_name = st.text_input("Integration name", value=f"MENDIX_{app_eai_slot.upper()}")
+with eai_c2:
+    app_eai_rule = st.text_input("Network rule name", value=f"{app_eai_slot.upper()}_EGRESS")
+    app_eai_host_port = st.text_input("Target host:port", value="<api-host>:443")
+st.code(
+    f"""CREATE NETWORK RULE {app_eai_rule}
+  TYPE = HOST_PORT
+  MODE = EGRESS
+  VALUE_LIST = ('{app_eai_host_port}');
+
+CREATE EXTERNAL ACCESS INTEGRATION {app_eai_name}
+  ALLOWED_NETWORK_RULES = ({app_eai_rule})
+  ENABLED = TRUE;
+
+CALL {app_name}.app_public.register_reference(
+  '{app_eai_slot}','ADD', SYSTEM$REFERENCE('EXTERNAL_ACCESS_INTEGRATION','{app_eai_name}','PERSISTENT','USAGE'));""",
+    language="sql",
+)
+st.caption(
+    "Binding restarts the controller and admin UI (they re-specify to pick up "
+    "the new APP_EAI_N env var - see start_controller in setup_script.sql), "
+    "then restarts each app once you attach it to this slot. Unbind the same "
+    "way with 'REMOVE' or 'CLEAR' in place of 'ADD'; a running app keeps the "
+    "slot until its next external-access save or rollback."
+)
+
+# --- Step 8: optional egress-expiry email alerts -----------------------------
+st.subheader("8 - Optional: egress-expiry email alerts")
+st.caption(
+    "The SPCS egress IP whitelist (step 1) rotates on Snowflake's own schedule "
+    "with no push notice. The Infrastructure page watches it daily and can email a "
+    "warning once the expiry is within 30 days - a notification integration is an "
+    "account-level object the app cannot create for itself, so create it here once, "
+    "then save the integration name and recipients on the Infrastructure page's "
+    "'Egress IP expiry' section. Recipients must be verified same-account user "
+    "emails; this step is entirely optional (the Apps-page banner works with no "
+    "email configured)."
+)
+notif_integration = st.text_input("Notification integration name", value="MENDIX_EGRESS_ALERTS")
+st.code(
+    f"""CREATE NOTIFICATION INTEGRATION {notif_integration}
+  TYPE = EMAIL
+  ENABLED = TRUE;
+
+GRANT USAGE ON INTEGRATION {notif_integration} TO APPLICATION {app_name};""",
+    language="sql",
+)
+
 st.divider()
 
 # --- Verify ------------------------------------------------------------------

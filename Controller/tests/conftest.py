@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # .../Controller
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import activity, auth, main, pg_admin, registry, snowflake_client  # noqa: E402
+from app import activity, auth, deploy_history, egress_watch, main, pg_admin, progress, registry, snowflake_client  # noqa: E402
 from app.models import AppRecord, HIDDEN_VALUE  # noqa: E402
 from app.pad_parser import PadConstant  # noqa: E402
 
@@ -50,7 +50,26 @@ def _reset_module_state():
     main._log_jobs.clear()
     snowflake_client._conn = None
     auth._identity_cache.clear()
+    progress._progress.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _noop_egress_loop(monkeypatch):
+    """main.py's lifespan starts egress_watch.run_loop() as a background
+    asyncio task every time the `client` fixture spins up a TestClient (it
+    triggers the ASGI lifespan). That loop then runs concurrently with the
+    test on a separate thread's event loop; letting it actually call
+    run_iteration would race any test that inspects or seeds egress config via
+    fake_sf.config. Replaced here with a harmless no-op for every test -
+    egress_watch.run_iteration/run_loop get their own direct, synchronous unit
+    tests in test_egress_watch_unit.py, and lifespan's task-creation/
+    cancellation wiring gets its own check in test_main_helpers.py, which
+    re-overrides this with an observable fake."""
+    async def _noop() -> None:
+        return
+
+    monkeypatch.setattr(egress_watch, "run_loop", _noop)
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +83,7 @@ _PATCHED_SF_FUNCS = [
     "drop_secret",
     "create_service",
     "alter_service_spec",
+    "set_service_external_access",
     "suspend_service",
     "resume_service",
     "drop_service",
@@ -73,10 +93,15 @@ _PATCHED_SF_FUNCS = [
     "drop_app_access_role",
     "show_service_status",
     "show_all_service_statuses",
+    "show_service_containers",
     "get_service_endpoint",
     "get_service_logs",
     "get_compute_pool",
     "alter_compute_pool",
+    "get_config",
+    "set_config",
+    "get_egress_ip_ranges",
+    "send_email",
 ]
 
 
@@ -93,6 +118,12 @@ class FakeSF:
         # without ever sleeping).
         self.status_queue: dict[str, list[str]] = {}
         self.endpoints: dict[str, str] = {}
+        # name -> list of container dicts ({"container_name", "status", "message"})
+        # returned by show_service_containers. Unset defaults to a single READY
+        # row (mirrors show_service_status's own "RUNNING" default above), so a
+        # test only has to seed this when it specifically wants a not-ready or
+        # empty container list.
+        self.containers: dict[str, list[dict]] = {}
         self.logs = "fake log line"
         self.compute_pool: dict | None = {
             "name": "TEST_POOL",
@@ -104,6 +135,15 @@ class FakeSF:
             "num_services": 1,
         }
         self.raise_on: dict[str, Exception] = {}
+        # Generic internal_config key/value store (see snowflake_client.get_config/
+        # set_config) - also backs egress_watch's state, so the background loop
+        # started by main.py's lifespan reads/writes this instead of any real
+        # Snowflake connection during tests.
+        self.config: dict[str, str] = {}
+        # Rows returned by get_egress_ip_ranges; empty by default (an unconfigured
+        # or freshly-installed app has fetched nothing yet).
+        self.egress_ranges: list[dict] = []
+        self.sent_emails: list[tuple[str, str, str, str]] = []
 
     def _record(self, name: str, args: tuple, kwargs: dict) -> None:
         self.calls.append((name, args, kwargs))
@@ -125,11 +165,14 @@ class FakeSF:
     def drop_secret(self, fqn):
         self._record("drop_secret", (fqn,), {})
 
-    def create_service(self, name, spec, compute_pool, eai, warehouse):
-        self._record("create_service", (name, spec, compute_pool, eai, warehouse), {})
+    def create_service(self, name, spec, compute_pool, eai_names, warehouse):
+        self._record("create_service", (name, spec, compute_pool, eai_names, warehouse), {})
 
     def alter_service_spec(self, name, spec):
         self._record("alter_service_spec", (name, spec), {})
+
+    def set_service_external_access(self, name, eai_names):
+        self._record("set_service_external_access", (name, eai_names), {})
 
     def suspend_service(self, name):
         self._record("suspend_service", (name,), {})
@@ -166,6 +209,12 @@ class FakeSF:
         self._record("show_all_service_statuses", (), {"strict": strict})
         return dict(self.service_statuses)
 
+    def show_service_containers(self, name):
+        self._record("show_service_containers", (name,), {})
+        return self.containers.get(
+            name, [{"container_name": "mendix-app", "status": "READY", "message": None}]
+        )
+
     def get_service_endpoint(self, name):
         self._record("get_service_endpoint", (name,), {})
         return self.endpoints.get(name)
@@ -184,6 +233,25 @@ class FakeSF:
             (pool_name,),
             {"min_nodes": min_nodes, "max_nodes": max_nodes, "auto_suspend_secs": auto_suspend_secs},
         )
+
+    def get_config(self, key):
+        self._record("get_config", (key,), {})
+        return self.config.get(key)
+
+    def set_config(self, key, value):
+        self._record("set_config", (key, value), {})
+        if value is None:
+            self.config.pop(key, None)
+        else:
+            self.config[key] = value
+
+    def get_egress_ip_ranges(self):
+        self._record("get_egress_ip_ranges", (), {})
+        return self.egress_ranges
+
+    def send_email(self, integration, recipients, subject, body):
+        self._record("send_email", (integration, recipients, subject, body), {})
+        self.sent_emails.append((integration, recipients, subject, body))
 
 
 @pytest.fixture
@@ -301,11 +369,80 @@ def fake_activity(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# fake_deploy_history: records every deploy_history.record(...) call main.py
+# makes, keyed by app_name, with a scriptable exception for the "history write
+# must never fail the lifecycle task" guarantee. Rows are plain dicts shaped
+# like deploy_history's own list_for_app()/last_success() output, so route
+# tests can seed a "prior successful deploy" directly without going through a
+# real INSERT.
+# ---------------------------------------------------------------------------
+
+class FakeDeployHistory:
+    def __init__(self):
+        self.rows: list[dict] = []  # oldest first, like the real table's insert order
+        self.raise_on_record: Exception | None = None
+        self._next_id = 1
+
+    def init_table(self) -> None:
+        pass
+
+    def record(self, app_name, operation, record, status, detail=None) -> None:
+        if self.raise_on_record:
+            raise self.raise_on_record
+        self.rows.append({
+            "id": self._next_id,
+            "app_name": app_name,
+            "operation": operation,
+            "status": status,
+            "detail": detail,
+            "pad_stage_path": record.pad_stage_path,
+            "resource_tier": record.resource_tier,
+            "use_caller_rights": bool(record.use_caller_rights),
+            "constant_names": sorted((record.constants or {}).keys()),
+            "license_id": record.license_id,
+            "role_mapping": record.role_mapping or {},
+            "external_access": record.external_access or [],
+        })
+        self._next_id += 1
+
+    def list_for_app(self, app_name, limit=20):
+        rows = [r for r in self.rows if r["app_name"].upper() == app_name.upper()]
+        return list(reversed(rows))[:limit]
+
+    def last_success(self, app_name):
+        for r in reversed(self.rows):
+            if r["app_name"].upper() == app_name.upper() and r["status"] == "READY":
+                return dict(r)
+        return None
+
+    def get_entry(self, app_name, entry_id):
+        for r in self.rows:
+            if r.get("id") == entry_id and r["app_name"].upper() == app_name.upper():
+                return dict(r)
+        return None
+
+    def delete_for_app(self, app_name) -> None:
+        self.rows = [r for r in self.rows if r["app_name"].upper() != app_name.upper()]
+
+
+@pytest.fixture
+def fake_deploy_history(monkeypatch):
+    fake = FakeDeployHistory()
+    monkeypatch.setattr(deploy_history, "init_table", fake.init_table)
+    monkeypatch.setattr(deploy_history, "record", fake.record)
+    monkeypatch.setattr(deploy_history, "list_for_app", fake.list_for_app)
+    monkeypatch.setattr(deploy_history, "last_success", fake.last_success)
+    monkeypatch.setattr(deploy_history, "get_entry", fake.get_entry)
+    monkeypatch.setattr(deploy_history, "delete_for_app", fake.delete_for_app)
+    return fake
+
+
+# ---------------------------------------------------------------------------
 # client
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def client(fake_sf, fake_registry, fake_activity, fake_pg_admin):
+def client(fake_sf, fake_registry, fake_activity, fake_deploy_history, fake_pg_admin):
     with TestClient(main.app) as c:
         yield c
 

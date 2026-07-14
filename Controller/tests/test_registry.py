@@ -30,6 +30,11 @@ class TestRowToRecord:
             "CREATED_AT": None,
             "LAST_DEPLOYED_AT": None,
             "OWNER_ROLE": "OWNER_ROLE",
+            "STATUS_DETAIL": None,
+            "FAILED_OPERATION": None,
+            "EXTERNAL_ACCESS": None,
+            "PLATFORM_IMAGE": None,
+            "PLATFORM_UPDATE_AVAILABLE": False,
         }
         row.update(overrides)
         return row
@@ -106,6 +111,53 @@ class TestRowToRecord:
         record = registry._row_to_record(row)
         assert record.role_mapping == {}
 
+    def test_status_detail_and_failed_operation_mapped(self):
+        row = self._row(STATUS_DETAIL="Timed out waiting for RUNNING after 120s", FAILED_OPERATION="deploy")
+        record = registry._row_to_record(row)
+        assert record.status_detail == "Timed out waiting for RUNNING after 120s"
+        assert record.failed_operation == "deploy"
+
+    def test_status_detail_and_failed_operation_default_to_none(self):
+        row = self._row()
+        record = registry._row_to_record(row)
+        assert record.status_detail is None
+        assert record.failed_operation is None
+
+    def test_external_access_string_json_decoded(self):
+        row = self._row(EXTERNAL_ACCESS='["app_eai_1", "app_eai_2"]')
+        record = registry._row_to_record(row)
+        assert record.external_access == ["app_eai_1", "app_eai_2"]
+
+    def test_external_access_native_passed_through(self):
+        row = self._row(EXTERNAL_ACCESS=["app_eai_1"])
+        record = registry._row_to_record(row)
+        assert record.external_access == ["app_eai_1"]
+
+    def test_external_access_none_becomes_empty_list(self):
+        row = self._row(EXTERNAL_ACCESS=None)
+        record = registry._row_to_record(row)
+        assert record.external_access == []
+
+    def test_platform_image_mapped(self):
+        row = self._row(PLATFORM_IMAGE="mendix-base:1.2.3")
+        record = registry._row_to_record(row)
+        assert record.platform_image == "mendix-base:1.2.3"
+
+    def test_platform_image_defaults_to_none(self):
+        row = self._row()
+        record = registry._row_to_record(row)
+        assert record.platform_image is None
+
+    def test_platform_update_available_truthiness(self):
+        row = self._row(PLATFORM_UPDATE_AVAILABLE=True)
+        record = registry._row_to_record(row)
+        assert record.platform_update_available is True
+
+    def test_platform_update_available_defaults_to_false(self):
+        row = self._row(PLATFORM_UPDATE_AVAILABLE=None)
+        record = registry._row_to_record(row)
+        assert record.platform_update_available is False
+
 
 class TestCreateApp:
     def test_insert_params_never_contain_plaintext_value(self, fake_execute_sql):
@@ -135,6 +187,45 @@ class TestCreateApp:
         sql, params = fake_execute_sql.calls[0]
         assert "license_id" in sql
         assert "LIC-1" in params
+
+    def test_external_access_included_as_param(self, fake_execute_sql):
+        record = AppRecord(
+            name="myapp", service_name="MYAPP_SERVICE", app_schema="MXAPP_MYAPP",
+            pg_database="myapp_db", resource_tier="medium", use_caller_rights=False,
+            constants={}, owner_role="OWNER_ROLE", external_access=["app_eai_1", "app_eai_2"],
+            pad_stage_path=None, endpoint_url=None, last_deploy_status="NOT_DEPLOYED",
+            created_at=None, last_deployed_at=None,
+        )
+        registry.create_app(record)
+        sql, params = fake_execute_sql.calls[0]
+        assert "external_access" in sql
+        eai_json = [p for p in params if isinstance(p, str) and "app_eai_1" in p][0]
+        assert json.loads(eai_json) == ["app_eai_1", "app_eai_2"]
+
+    def test_external_access_defaults_to_empty_list_param(self, fake_execute_sql):
+        record = AppRecord(
+            name="myapp", service_name="MYAPP_SERVICE", app_schema="MXAPP_MYAPP",
+            pg_database="myapp_db", resource_tier="medium", use_caller_rights=False,
+            constants={}, owner_role="OWNER_ROLE",
+            pad_stage_path=None, endpoint_url=None, last_deploy_status="NOT_DEPLOYED",
+            created_at=None, last_deployed_at=None,
+        )
+        registry.create_app(record)
+        sql, params = fake_execute_sql.calls[0]
+        assert "[]" in params
+
+    def test_platform_image_included_as_param(self, fake_execute_sql):
+        record = AppRecord(
+            name="myapp", service_name="MYAPP_SERVICE", app_schema="MXAPP_MYAPP",
+            pg_database="myapp_db", resource_tier="medium", use_caller_rights=False,
+            constants={}, owner_role="OWNER_ROLE",
+            pad_stage_path=None, endpoint_url=None, last_deploy_status="NOT_DEPLOYED",
+            created_at=None, last_deployed_at=None, platform_image="/repo/mendix-base:latest",
+        )
+        registry.create_app(record)
+        sql, params = fake_execute_sql.calls[0]
+        assert "platform_image" in sql
+        assert "/repo/mendix-base:latest" in params
 
 
 class TestGetApp:
@@ -213,6 +304,42 @@ class TestUpdateApp:
         sql, params = fake_execute_sql.calls[0]
         assert "user_roles = %s" in sql
         assert params == (None, "myapp")
+
+    def test_external_access_routed_through_parse_json(self, fake_execute_sql):
+        registry.update_app("myapp", {"external_access": ["app_eai_1"]})
+        sql, params = fake_execute_sql.calls[0]
+        assert "external_access = PARSE_JSON(%s)" in sql
+        assert json.loads(params[0]) == ["app_eai_1"]
+
+    def test_external_access_none_binds_sql_null(self, fake_execute_sql):
+        registry.update_app("myapp", {"external_access": None})
+        sql, params = fake_execute_sql.calls[0]
+        assert "external_access = %s" in sql
+        assert params == (None, "myapp")
+
+    def test_status_detail_field_allowed(self, fake_execute_sql):
+        registry.update_app("myapp", {"status_detail": "boom"})
+        sql, params = fake_execute_sql.calls[0]
+        assert "status_detail = %s" in sql
+        assert params == ("boom", "myapp")
+
+    def test_failed_operation_field_allowed(self, fake_execute_sql):
+        registry.update_app("myapp", {"failed_operation": "deploy"})
+        sql, params = fake_execute_sql.calls[0]
+        assert "failed_operation = %s" in sql
+        assert params == ("deploy", "myapp")
+
+    def test_platform_image_field_allowed(self, fake_execute_sql):
+        registry.update_app("myapp", {"platform_image": "mendix-base:1.2.3"})
+        sql, params = fake_execute_sql.calls[0]
+        assert "platform_image = %s" in sql
+        assert params == ("mendix-base:1.2.3", "myapp")
+
+    def test_platform_update_available_field_allowed(self, fake_execute_sql):
+        registry.update_app("myapp", {"platform_update_available": True})
+        sql, params = fake_execute_sql.calls[0]
+        assert "platform_update_available = %s" in sql
+        assert params == (True, "myapp")
 
 
 class TestDeleteApp:

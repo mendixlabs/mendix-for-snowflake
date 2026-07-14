@@ -54,6 +54,31 @@ ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS app_schema VARCHAR;
 ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS license_id VARCHAR;
 ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS user_roles VARIANT;
 ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS role_mapping VARIANT;
+ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS status_detail VARCHAR;
+ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS failed_operation VARCHAR;
+ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS external_access VARIANT;      -- list of slot keys
+ALTER TABLE app_public.MENDIX_APPS ADD COLUMN IF NOT EXISTS platform_image VARCHAR;       -- image at last respec
+-- Snowflake documents that ADD COLUMN IF NOT EXISTS cannot be combined with DEFAULT
+-- (ALTER TABLE docs, "Table column actions"), but only enforces it once the column
+-- already exists, and then with a misleading "ambiguous column name" error (confirmed
+-- live, patch 25 dry run: this broke every upgrade after the column's first creation,
+-- fatally, since the setup script runs transactionally).
+-- An explicit existence check against INFORMATION_SCHEMA.COLUMNS is the supported form; the
+-- unqualified INFORMATION_SCHEMA below resolves against the app's own database, which is
+-- current while this script runs.
+EXECUTE IMMEDIATE
+$$
+BEGIN
+  IF (NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'APP_PUBLIC' AND TABLE_NAME = 'MENDIX_APPS'
+          AND COLUMN_NAME = 'PLATFORM_UPDATE_AVAILABLE'
+      )) THEN
+    ALTER TABLE app_public.MENDIX_APPS ADD COLUMN platform_update_available BOOLEAN DEFAULT FALSE;
+  END IF;
+  RETURN 'ok';
+END;
+$$;
 
 -- The controller used to create this at startup (activity.py::init_table); pre-create
 -- it here so the schema is complete on install.
@@ -65,6 +90,25 @@ CREATE TABLE IF NOT EXISTS app_public.MENDIX_ACTIVITY (
     app_name  VARCHAR,
     detail    VARIANT,
     result    VARCHAR
+);
+
+-- Per-deploy audit trail (deploy/constants/spec/license/role_mapping/external_access/
+-- platform_update/rollback), separate from MENDIX_ACTIVITY (operator-action log): this
+-- one snapshots the inputs of each app mutation so a rollback can replay them.
+CREATE TABLE IF NOT EXISTS app_public.MENDIX_DEPLOY_HISTORY (
+    id                NUMBER    AUTOINCREMENT PRIMARY KEY,
+    app_name          VARCHAR   NOT NULL,
+    ts                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    operation         VARCHAR,            -- deploy|constants|spec|license|role_mapping|external_access|platform_update|rollback
+    pad_stage_path    VARCHAR,
+    resource_tier     VARCHAR,
+    use_caller_rights BOOLEAN,
+    constant_names    VARIANT,            -- names only, never values (values live in secrets)
+    license_id        VARCHAR,
+    role_mapping      VARIANT,
+    external_access   VARIANT,
+    status            VARCHAR,            -- READY|FAILED
+    detail            VARCHAR
 );
 
 -- -----------------------------------------------------------------------------
@@ -92,6 +136,37 @@ CREATE TABLE IF NOT EXISTS app_public.install_state (
 );
 INSERT INTO app_public.install_state (pool_ready, secret_bound, eai_bound)
     SELECT FALSE, FALSE, FALSE WHERE NOT EXISTS (SELECT 1 FROM app_public.install_state);
+-- Per-app EAI slot bind state (app_eai_1..4 references); tracked the same deterministic way as
+-- secret_bound/eai_bound above rather than probed via SYSTEM$GET_ALL_REFERENCES.
+-- Same ADD COLUMN IF NOT EXISTS + DEFAULT restriction as MENDIX_APPS.platform_update_available
+-- above (errors "ambiguous column name" once a column already exists); guard each of
+-- these four the same way with an explicit existence check.
+EXECUTE IMMEDIATE
+$$
+BEGIN
+  IF (NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'APP_PUBLIC' AND TABLE_NAME = 'INSTALL_STATE'
+          AND COLUMN_NAME = 'APP_EAI_1_BOUND')) THEN
+    ALTER TABLE app_public.install_state ADD COLUMN app_eai_1_bound BOOLEAN DEFAULT FALSE;
+  END IF;
+  IF (NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'APP_PUBLIC' AND TABLE_NAME = 'INSTALL_STATE'
+          AND COLUMN_NAME = 'APP_EAI_2_BOUND')) THEN
+    ALTER TABLE app_public.install_state ADD COLUMN app_eai_2_bound BOOLEAN DEFAULT FALSE;
+  END IF;
+  IF (NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'APP_PUBLIC' AND TABLE_NAME = 'INSTALL_STATE'
+          AND COLUMN_NAME = 'APP_EAI_3_BOUND')) THEN
+    ALTER TABLE app_public.install_state ADD COLUMN app_eai_3_bound BOOLEAN DEFAULT FALSE;
+  END IF;
+  IF (NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'APP_PUBLIC' AND TABLE_NAME = 'INSTALL_STATE'
+          AND COLUMN_NAME = 'APP_EAI_4_BOUND')) THEN
+    ALTER TABLE app_public.install_state ADD COLUMN app_eai_4_bound BOOLEAN DEFAULT FALSE;
+  END IF;
+  RETURN 'ok';
+END;
+$$;
 
 -- Internal-hop auth token. The admin UI calls the controller over the internal
 -- service-to-service hop, where SPCS injects no caller token, so it vouches for the
@@ -202,6 +277,19 @@ BEGIN
             -- consumer supplies it when binding; allowed_secrets = LIST ties the EAI
             -- to the pg_secret they also bind.
             RETURN '{"type": "CONFIGURATION", "payload": {"host_ports": [], "allowed_secrets": "LIST", "secret_references": ["pg_secret"]}}';
+        WHEN 'app_eai_1' THEN
+            -- Per-app egress slots are general-purpose (whatever API a deployed
+            -- Mendix app needs to call), not tied to any bound secret the way
+            -- pg_eai is tied to pg_secret - allowed_secrets = NONE, no
+            -- secret_references, unlike pg_eai above. host_ports is still
+            -- consumer-supplied at bind time.
+            RETURN '{"type": "CONFIGURATION", "payload": {"host_ports": [], "allowed_secrets": "NONE"}}';
+        WHEN 'app_eai_2' THEN
+            RETURN '{"type": "CONFIGURATION", "payload": {"host_ports": [], "allowed_secrets": "NONE"}}';
+        WHEN 'app_eai_3' THEN
+            RETURN '{"type": "CONFIGURATION", "payload": {"host_ports": [], "allowed_secrets": "NONE"}}';
+        WHEN 'app_eai_4' THEN
+            RETURN '{"type": "CONFIGURATION", "payload": {"host_ports": [], "allowed_secrets": "NONE"}}';
         ELSE
             RETURN '{"type": "ERROR", "payload": {"message": "unknown reference: ' || ref_name || '"}}';
     END;
@@ -238,6 +326,20 @@ BEGIN
         UPDATE app_public.install_state SET secret_bound = :is_add;
     ELSEIF (ref_name = 'pg_eai') THEN
         UPDATE app_public.install_state SET eai_bound = :is_add;
+    -- Per-app egress slots (app_eai_1..4): tracked the same way, but their bound
+    -- flags deliberately do NOT join maybe_start_services' readiness gate below -
+    -- the controller and admin UI must come up whether or not any operator ever
+    -- binds one of these optional slots. CLEAR reaches here too (is_add is FALSE
+    -- for both REMOVE and CLEAR), so SYSTEM$REMOVE_ALL_REFERENCES on one of these
+    -- single-valued slots clears only that slot's own flag, mirroring pg_eai above.
+    ELSEIF (ref_name = 'app_eai_1') THEN
+        UPDATE app_public.install_state SET app_eai_1_bound = :is_add;
+    ELSEIF (ref_name = 'app_eai_2') THEN
+        UPDATE app_public.install_state SET app_eai_2_bound = :is_add;
+    ELSEIF (ref_name = 'app_eai_3') THEN
+        UPDATE app_public.install_state SET app_eai_3_bound = :is_add;
+    ELSEIF (ref_name = 'app_eai_4') THEN
+        UPDATE app_public.install_state SET app_eai_4_bound = :is_add;
     END IF;
 
     CALL app_public.maybe_start_services();
@@ -297,14 +399,19 @@ CREATE OR REPLACE PROCEDURE app_public.start_controller()
 AS
 $$
 DECLARE
-    app_db    STRING;
-    db_schema STRING;
-    pool      STRING;
-    wh        STRING;
-    spec      STRING;
-    ddl       STRING;
-    dollar    STRING;
-    auth_tok  STRING;
+    app_db      STRING;
+    db_schema   STRING;
+    pool        STRING;
+    wh          STRING;
+    spec        STRING;
+    ddl         STRING;
+    dollar      STRING;
+    auth_tok    STRING;
+    eai1_bound  BOOLEAN;
+    eai2_bound  BOOLEAN;
+    eai3_bound  BOOLEAN;
+    eai4_bound  BOOLEAN;
+    app_eai_env STRING DEFAULT '';
 BEGIN
     app_db    := CURRENT_DATABASE();
     db_schema := app_db || '.APP_PUBLIC';
@@ -317,6 +424,41 @@ BEGIN
     -- Built at runtime so no literal dollar-quote delimiter appears in this proc
     -- body (which is itself dollar-quoted); used to quote the inline service spec.
     dollar    := '$' || '$';
+
+    -- reference('app_eai_N') fails DDL outright on an unbound reference, unlike
+    -- reference('pg_eai') above which is always bound by the time services start
+    -- (maybe_start_services gates on it) - these four are optional, so each
+    -- APP_EAI_N env line is only appended once install_state confirms that slot
+    -- is actually bound. An unbound slot is simply absent from the controller's
+    -- env (main.py's BOUND_EAI_SLOTS then never has that key), not set to an
+    -- empty/placeholder value.
+    SELECT app_eai_1_bound, app_eai_2_bound, app_eai_3_bound, app_eai_4_bound
+        INTO :eai1_bound, :eai2_bound, :eai3_bound, :eai4_bound
+        FROM app_public.install_state;
+    -- Real embedded newlines (not a "\n" escape - see the dollar/spec strings
+    -- elsewhere in this file, which build the YAML the same way) so each
+    -- appended line lands on its own row of the env: block once concatenated.
+    IF (eai1_bound) THEN
+        app_eai_env := app_eai_env ||
+'
+      APP_EAI_1: reference(''app_eai_1'')';
+    END IF;
+    IF (eai2_bound) THEN
+        app_eai_env := app_eai_env ||
+'
+      APP_EAI_2: reference(''app_eai_2'')';
+    END IF;
+    IF (eai3_bound) THEN
+        app_eai_env := app_eai_env ||
+'
+      APP_EAI_3: reference(''app_eai_3'')';
+    END IF;
+    IF (eai4_bound) THEN
+        app_eai_env := app_eai_env ||
+'
+      APP_EAI_4: reference(''app_eai_4'')';
+    END IF;
+
     spec :=
 'spec:
   containers:
@@ -327,7 +469,7 @@ BEGIN
       IMAGE_REPO: <PROVIDER_DB>/<PROVIDER_SCHEMA>/<REPO>/mendix-base
       MENDIX_BASE_IMAGE: /<PROVIDER_DB>/<PROVIDER_SCHEMA>/<REPO>/mendix-base:latest
       DB_SCHEMA: ' || db_schema || '
-      PG_EAI: reference(''pg_eai'')
+      PG_EAI: reference(''pg_eai'')' || app_eai_env || '
       QUERY_WAREHOUSE: ' || wh || '
       CONTROLLER_SERVICE_NAME: MENDIX_DEPLOY_CONTROLLER
       ADMIN_UI_SERVICE_NAME: MENDIX_DEPLOY_ADMIN_UI
@@ -511,3 +653,31 @@ GRANT USAGE ON PROCEDURE app_public.grant_callback(ARRAY)                       
 GRANT USAGE ON PROCEDURE app_public.get_reference_config(STRING)                TO APPLICATION ROLE app_admin;
 GRANT USAGE ON PROCEDURE app_public.register_reference(STRING, STRING, STRING)  TO APPLICATION ROLE app_admin;
 GRANT USAGE ON PROCEDURE app_public.maybe_start_services()                      TO APPLICATION ROLE app_admin;
+
+-- -----------------------------------------------------------------------------
+-- 11. Post-upgrade respec. This script re-runs on every ALTER APPLICATION
+--     ... UPGRADE, but re-running it changes no service spec_digest by itself
+--     (Patch-24 finding) - a plain upgrade otherwise leaves the controller and
+--     admin UI pinned to whatever image they last respec'd against. Calling
+--     maybe_start_services() here makes the upgrade self-service: it re-applies
+--     the current image/manifest to both services without a manual runbook
+--     step. Safe on a fresh install (both references are still unbound, so the
+--     procedure's own readiness gate returns 'waiting' without touching
+--     anything). The EXCEPTION guard is required either way: an upgrade must
+--     never fail outright over a transient service hiccup (e.g. the compute
+--     pool briefly unavailable), so any error here is swallowed and reported
+--     only as this statement's own result, not a failed upgrade.
+--     A bare BEGIN...END has no meaning as a top-level statement outside a
+--     procedure body - EXECUTE IMMEDIATE with dollar-quoting is what actually
+--     runs a Snowflake Scripting block standalone. $$ is safe unquoted here
+--     (unlike inside the procedure bodies above): this call sits at the
+--     script's top level, not nested inside another dollar-quoted body.
+-- -----------------------------------------------------------------------------
+EXECUTE IMMEDIATE
+$$
+BEGIN
+  CALL app_public.maybe_start_services();
+EXCEPTION WHEN OTHER THEN
+  RETURN 'post-upgrade respec skipped: ' || SQLERRM;
+END;
+$$;

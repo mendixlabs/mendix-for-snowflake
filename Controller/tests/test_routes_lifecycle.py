@@ -63,6 +63,21 @@ class TestTriggerDeploy:
         assert final.endpoint_url == "https://live.example.com"
         assert final.constants["Mod.New"] == "world"
 
+    def test_success_stamps_platform_image_and_clears_flag(self, client, fake_sf, fake_registry, make_record,
+                                                            role_headers, staged_pad, make_pad_zip):
+        from app import main
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={},
+                             platform_image="/repo/mendix-base:old", platform_update_available=True)
+        fake_registry.add(record)
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.platform_image == main.MENDIX_BASE_IMAGE
+        assert final.platform_update_available is False
+
     def test_unchanged_constants_still_rebuilds_spec(self, client, fake_sf, fake_registry, make_record,
                                                       role_headers, staged_pad, make_pad_zip):
         # Regression guard: PAD_STAGE_PATH must be refreshed even when constants
@@ -161,6 +176,105 @@ class TestTriggerDeploy:
         final = fake_registry.get_app("myapp")
         assert final.last_deploy_status == "READY"
         assert final.user_roles == []
+
+    def test_poll_timeout_records_status_detail_and_op(self, client, fake_sf, fake_registry, make_record,
+                                                        role_headers, staged_pad, make_pad_zip, monkeypatch):
+        from app import main
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        monkeypatch.setattr(main, "_poll_status", lambda *a, **k: False)
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "deploy"
+        assert final.status_detail == "Timed out waiting for RUNNING after 300s"
+
+    def test_running_but_containers_never_ready_marks_failed(self, client, fake_sf, fake_registry, make_record,
+                                                              role_headers, staged_pad, make_pad_zip, monkeypatch):
+        # Regression guard for the live patch-25 bug: SPCS can report a service
+        # RUNNING as soon as a container starts, before its readinessProbe
+        # passes (sf.show_service_containers's docstring). A crash-looping
+        # container must fail the deploy, not be declared READY on the
+        # transient service-level RUNNING alone.
+        from app import main
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "RUNNING"
+        fake_sf.containers[record.service_name] = [
+            {"container_name": "mendix-app", "status": "FAILED",
+             "message": "User application error, check container logs"},
+        ]
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        # Fake the clock only now, after the PAD zip is written (zipfile itself
+        # calls time.time() for its own file timestamps, so patching it earlier
+        # would corrupt the archive).
+        state = {"t": 0.0}
+        monkeypatch.setattr(main.time, "time", lambda: state["t"])
+        monkeypatch.setattr(main.time, "sleep", lambda secs: state.update(t=state["t"] + secs))
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "deploy"
+        assert "User application error, check container logs" in final.status_detail
+
+    def test_all_containers_ready_succeeds_with_no_status_detail(self, client, fake_sf, fake_registry, make_record,
+                                                                  role_headers, staged_pad, make_pad_zip):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "RUNNING"
+        fake_sf.containers[record.service_name] = [
+            {"container_name": "mendix-app", "status": "READY", "message": None},
+        ]
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "READY"
+        assert final.status_detail is None
+
+    def test_exception_records_truncated_status_detail_and_op(self, client, fake_sf, fake_registry, make_record,
+                                                               role_headers, staged_pad, make_pad_zip):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={})
+        fake_registry.add(record)
+        fake_sf.raise_on["alter_service_spec"] = RuntimeError("boom")
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.failed_operation == "deploy"
+        assert final.status_detail == "boom"
+
+    def test_success_clears_prior_status_detail_and_failed_operation(self, client, fake_sf, fake_registry,
+                                                                      make_record, role_headers, staged_pad,
+                                                                      make_pad_zip):
+        # Regression guard: a redeploy that succeeds must wipe out whatever
+        # FAILED-run detail a previous attempt left behind - otherwise a stale
+        # "Failed during deploy: ..." caption would keep showing in the UI for
+        # an app that is actually READY again.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE", constants={},
+                             status_detail="Timed out waiting for RUNNING after 300s",
+                             failed_operation="deploy")
+        fake_registry.add(record)
+        zpath = make_pad_zip(defaults_text='"Mod.New" = "world"',
+                             variables_text='"Mod.New" = ${?MOD_NEW}')
+        staged_pad("myapp", src_zip=zpath)
+        resp = client.post("/apps/myapp/trigger-deploy", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "READY"
+        assert final.status_detail is None
+        assert final.failed_operation is None
 
 
 class TestRoleMappingSurvivesRestarts:
@@ -294,6 +408,22 @@ class TestUpdateSpec:
         assert final.resource_tier == "large"
         assert final.last_deploy_status == "READY"
 
+    def test_success_stamps_platform_image_and_clears_flag(self, client, fake_sf, fake_registry,
+                                                            make_record, role_headers):
+        # _run_update_spec always rebuilds the spec, so a plain tier/caller-rights
+        # change also picks up the current platform image - and clears a
+        # previously-set staleness flag, since the freshly-applied spec is current.
+        from app import main
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", resource_tier="medium",
+                                      platform_image="/repo/mendix-base:old",
+                                      platform_update_available=True))
+        resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
+                          json={"resource_tier": "large"})
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.platform_image == main.MENDIX_BASE_IMAGE
+        assert final.platform_update_available is False
+
     def test_caller_rights_off_to_on_updates_registry(self, client, fake_sf, fake_registry, make_record, role_headers):
         fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", use_caller_rights=False))
         resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
@@ -320,7 +450,95 @@ class TestUpdateSpec:
         resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
                           json={"resource_tier": "large"})
         assert resp.status_code == 202  # exception happens in the background task, not the request
-        assert fake_registry.get_app("myapp").last_deploy_status == "FAILED"
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "spec"
+        assert final.status_detail == "boom"
+
+    def test_success_clears_prior_status_detail_and_failed_operation(self, client, fake_sf, fake_registry,
+                                                                      make_record, role_headers):
+        # _run_update_spec's on_success bypasses _stamp_deploy_success (its own
+        # inline registry.update_app), so it needs the same clearing.
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE", resource_tier="medium",
+                                     status_detail="boom", failed_operation="spec"))
+        resp = client.put("/apps/myapp/spec", headers=role_headers("OWNER_ROLE"),
+                          json={"resource_tier": "large"})
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.status_detail is None
+        assert final.failed_operation is None
+
+
+class TestPlatformUpdate:
+    def test_not_flagged_409(self, client, fake_sf, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      platform_update_available=False))
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 409
+        assert fake_sf.calls_for("alter_service_spec") == []
+
+    def test_stranger_403(self, client, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      platform_update_available=True))
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OTHER_ROLE"))
+        assert resp.status_code == 403
+
+    def test_unknown_app_404(self, client, fake_registry, role_headers):
+        resp = client.post("/apps/ghost/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 404
+
+    def test_no_pad_deployed_yet_409(self, client, fake_sf, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      platform_update_available=True, pad_stage_path=None))
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 409
+        assert fake_sf.calls_for("alter_service_spec") == []
+
+    def test_flagged_triggers_background_respec_unchanged_tier_and_caller(
+            self, client, fake_sf, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      resource_tier="large", use_caller_rights=True,
+                                      platform_image="/repo/mendix-base:old",
+                                      platform_update_available=True))
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        assert resp.json() == {"status": "DEPLOYING"}
+        assert fake_sf.calls_for("alter_service_spec")
+        final = fake_registry.get_app("myapp")
+        assert final.resource_tier == "large"
+        assert final.use_caller_rights is True
+
+    def test_success_clears_flag_and_stamps_image(self, client, fake_sf, fake_registry, make_record,
+                                                   role_headers):
+        from app import main
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      platform_image="/repo/mendix-base:old",
+                                      platform_update_available=True))
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.platform_image == main.MENDIX_BASE_IMAGE
+        assert final.platform_update_available is False
+        assert final.last_deploy_status == "READY"
+
+    def test_transient_blocked_409(self, client, fake_sf, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      platform_update_available=True,
+                                      last_deploy_status="DEPLOYING"))
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 409
+        assert fake_sf.calls_for("alter_service_spec") == []
+
+    def test_failure_marks_failed_operation(self, client, fake_sf, fake_registry, make_record, role_headers):
+        fake_registry.add(make_record(name="myapp", owner_role="OWNER_ROLE",
+                                      platform_update_available=True))
+        fake_sf.raise_on["alter_service_spec"] = RuntimeError("boom")
+        resp = client.post("/apps/myapp/platform-update", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202  # exception happens in the background task, not the request
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "platform_update"
+        assert final.status_detail == "boom"
 
 
 class TestSuspendResume:
@@ -354,7 +572,60 @@ class TestSuspendResume:
         fake_sf.raise_on["suspend_service"] = RuntimeError("boom")
         resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 202
-        assert fake_registry.get_app("myapp").last_deploy_status == "FAILED"
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "suspend"
+        assert final.status_detail == "boom"
+
+    def test_suspend_poll_timeout_records_detail(self, client, fake_sf, fake_registry, make_record,
+                                                 role_headers, monkeypatch):
+        from app import main
+        record = make_record(name="myapp", owner_role="OWNER_ROLE")
+        fake_registry.add(record)
+        monkeypatch.setattr(main, "_poll_status", lambda *a, **k: False)
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.failed_operation == "suspend"
+        assert final.status_detail == "Timed out waiting for SUSPENDED after 120s"
+
+    def test_suspend_success_clears_prior_status_detail(self, client, fake_sf, fake_registry, make_record,
+                                                        role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE",
+                             status_detail="boom", failed_operation="deploy")
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.status_detail is None
+        assert final.failed_operation is None
+
+    def test_suspend_success_does_not_stamp_platform_image(self, client, fake_sf, fake_registry,
+                                                            make_record, role_headers):
+        # Suspend never rebuilds the spec, so it must not touch platform_image /
+        # platform_update_available either way.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE",
+                             platform_image="/repo/mendix-base:old", platform_update_available=True)
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.platform_image == "/repo/mendix-base:old"
+        assert final.platform_update_available is True
+
+    def test_suspend_never_calls_show_service_containers(self, client, fake_sf, fake_registry, make_record,
+                                                          role_headers):
+        # SUSPENDED has no container-readiness concept - _poll_ready must
+        # return on the service-level match alone, same as before this file's
+        # container-readiness change.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE")
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+        resp = client.post("/apps/myapp/suspend", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        assert fake_sf.calls_for("show_service_containers") == []
 
     def test_resume_transient_then_success(self, client, fake_sf, fake_registry, make_record, role_headers):
         record = make_record(name="myapp", owner_role="OWNER_ROLE")
@@ -373,7 +644,56 @@ class TestSuspendResume:
         fake_sf.raise_on["resume_service"] = RuntimeError("boom")
         resp = client.post("/apps/myapp/resume", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 202
-        assert fake_registry.get_app("myapp").last_deploy_status == "FAILED"
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "resume"
+        assert final.status_detail == "boom"
+
+    def test_resume_success_clears_prior_status_detail(self, client, fake_sf, fake_registry, make_record,
+                                                        role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE",
+                             status_detail="boom", failed_operation="suspend")
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "RUNNING"
+        resp = client.post("/apps/myapp/resume", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.status_detail is None
+        assert final.failed_operation is None
+
+    def test_resume_success_does_not_stamp_platform_image(self, client, fake_sf, fake_registry,
+                                                           make_record, role_headers):
+        record = make_record(name="myapp", owner_role="OWNER_ROLE",
+                             platform_image="/repo/mendix-base:old", platform_update_available=True)
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "RUNNING"
+        resp = client.post("/apps/myapp/resume", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.platform_image == "/repo/mendix-base:old"
+        assert final.platform_update_available is True
+
+    def test_resume_running_but_containers_never_ready_marks_failed(self, client, fake_sf, fake_registry,
+                                                                     make_record, role_headers, monkeypatch):
+        # Resume targets RUNNING like every restart, so a crash-loop right
+        # after resume must not be declared READY either.
+        from app import main
+        record = make_record(name="myapp", owner_role="OWNER_ROLE")
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "RUNNING"
+        fake_sf.containers[record.service_name] = [
+            {"container_name": "mendix-app", "status": "FAILED",
+             "message": "User application error, check container logs"},
+        ]
+        state = {"t": 0.0}
+        monkeypatch.setattr(main.time, "time", lambda: state["t"])
+        monkeypatch.setattr(main.time, "sleep", lambda secs: state.update(t=state["t"] + secs))
+        resp = client.post("/apps/myapp/resume", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 202
+        final = fake_registry.get_app("myapp")
+        assert final.last_deploy_status == "FAILED"
+        assert final.failed_operation == "resume"
+        assert "User application error, check container logs" in final.status_detail
 
 
 class TestSpecRebuildRequiresPad:

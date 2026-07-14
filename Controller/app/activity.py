@@ -21,8 +21,11 @@ _ACTION_PATTERNS = [
     (re.compile(r"^/apps/([^/]+)/spec$"), "update_spec"),
     (re.compile(r"^/apps/([^/]+)/license$"), "update_license"),
     (re.compile(r"^/apps/([^/]+)/role-mapping$"), "update_role_mapping"),
+    (re.compile(r"^/apps/([^/]+)/external-access$"), "update_external_access"),
     (re.compile(r"^/apps/([^/]+)$"), "delete"),
     (re.compile(r"^/system/compute-pool$"), "resize_compute_pool"),
+    (re.compile(r"^/system/egress-ack$"), "acknowledge_egress"),
+    (re.compile(r"^/system/egress-alert-config$"), "set_egress_alert_config"),
 ]
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -148,14 +149,15 @@ def create_stage(fqn: str) -> None:
     execute_sql(f"CREATE STAGE IF NOT EXISTS {fqn} ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')")
 
 
-def create_service(name: str, spec: str, compute_pool: str, eai: str, warehouse: str) -> None:
+def create_service(name: str, spec: str, compute_pool: str, eai_names: list[str], warehouse: str) -> None:
+    eai_clause = ", ".join(eai_names)
     execute_sql(textwrap.dedent(f"""\
         CREATE SERVICE {_DB_SCHEMA}.{name}
             IN COMPUTE POOL {compute_pool}
             FROM SPECIFICATION $${spec}$$
             MIN_INSTANCES = 1
             MAX_INSTANCES = 1
-            EXTERNAL_ACCESS_INTEGRATIONS = ({eai})
+            EXTERNAL_ACCESS_INTEGRATIONS = ({eai_clause})
             QUERY_WAREHOUSE = {warehouse}
     """))
     # Without this, get_service_logs() 403s for every caller (including
@@ -167,6 +169,17 @@ def create_service(name: str, spec: str, compute_pool: str, eai: str, warehouse:
 
 def alter_service_spec(name: str, spec: str) -> None:
     execute_sql(f"ALTER SERVICE {_DB_SCHEMA}.{name} FROM SPECIFICATION $${spec}$$")
+
+
+def set_service_external_access(name: str, eai_names: list[str]) -> None:
+    """Standalone ALTER SERVICE ... SET EXTERNAL_ACCESS_INTEGRATIONS, mutually
+    exclusive with ALTER SERVICE ... FROM SPECIFICATION as separate statements
+    (see setup_script.sql's start_controller for the same split on the
+    controller's own service). Used for a per-app external-access update, which
+    never touches the rest of the service spec at all - no _build_spec call,
+    no PAD/constants/tier involved."""
+    eai_clause = ", ".join(eai_names)
+    execute_sql(f"ALTER SERVICE {_DB_SCHEMA}.{name} SET EXTERNAL_ACCESS_INTEGRATIONS = ({eai_clause})")
 
 
 def suspend_service(name: str) -> None:
@@ -255,6 +268,30 @@ def show_all_service_statuses(*, strict: bool = False) -> dict[str, str]:
         return {}
 
 
+def show_service_containers(name: str) -> list[dict]:
+    """Return per-container status rows for a service (metadata-only, like
+    show_service_status/show_all_service_statuses above). SHOW SERVICE CONTAINERS
+    reports one row per container instance (container_name, status, message,
+    among other columns); status turns READY only once the container's own
+    readinessProbe passes, so this is how a caller tells "container up" apart
+    from "Mendix serving" - show_service_status's aggregate RUNNING alone
+    cannot. Parsed defensively (row.get, never indexing) since the column set
+    is not part of any stability contract this code depends on."""
+    try:
+        rows = execute_sql(f"SHOW SERVICE CONTAINERS IN SERVICE {_DB_SCHEMA}.{name}")
+        return [
+            {
+                "container_name": row.get("container_name"),
+                "status": row.get("status"),
+                "message": row.get("message"),
+            }
+            for row in rows
+        ]
+    except Exception:
+        logger.warning("show_service_containers failed for %s.%s", _DB_SCHEMA, name, exc_info=True)
+        return []
+
+
 def get_service_endpoint(name: str) -> str | None:
     try:
         rows = execute_sql(f"SHOW ENDPOINTS IN SERVICE {_DB_SCHEMA}.{name}")
@@ -322,3 +359,82 @@ def alter_compute_pool(
     if not parts:
         return
     execute_sql(f"ALTER COMPUTE POOL {pool_name} SET {' '.join(parts)}")
+
+
+# ---------------------------------------------------------------------------
+# Generic key/value config (app_public.internal_config)
+#
+# setup_script.sql creates this table and seeds it with 'internal_auth_token'
+# (see auth.py's module docstring); this is the one Python read/write path for
+# it, reused by every caller that needs a small persisted setting (currently
+# egress_watch.py's rotation state and the egress-alert configuration) rather
+# than each growing its own ad hoc settings mechanism.
+# ---------------------------------------------------------------------------
+
+_CONFIG_TABLE = f"{_DB_SCHEMA}.internal_config"
+
+
+def get_config(key: str) -> str | None:
+    """The stored value for `key`, or None if it has never been set."""
+    rows = execute_sql(
+        f"SELECT config_value FROM {_CONFIG_TABLE} WHERE config_key = %s",  # nosec B608 - _CONFIG_TABLE is a fixed constant, key is parameterized
+        (key,),
+    )
+    if not rows:
+        return None
+    return rows[0].get("CONFIG_VALUE")
+
+
+def set_config(key: str, value: str | None) -> None:
+    """Upsert `key` to `value`, or delete it outright when value is None (used
+    to clear an optional setting like the egress alert config rather than
+    storing an empty string - config_value is NOT NULL)."""
+    if value is None:
+        execute_sql(
+            f"DELETE FROM {_CONFIG_TABLE} WHERE config_key = %s",  # nosec B608 - _CONFIG_TABLE is a fixed constant, key is parameterized
+            (key,),
+        )
+        return
+    execute_sql(
+        f"""
+        MERGE INTO {_CONFIG_TABLE} t
+        USING (SELECT %s AS k, %s AS v) s
+        ON t.config_key = s.k
+        WHEN MATCHED THEN UPDATE SET config_value = s.v
+        WHEN NOT MATCHED THEN INSERT (config_key, config_value) VALUES (s.k, s.v)
+        """,  # nosec B608 - _CONFIG_TABLE is a fixed constant, key/value are parameterized
+        (key, value),
+    )
+
+
+def get_egress_ip_ranges() -> list[dict]:
+    """Parsed SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES() output: a list of dicts
+    with (at least) ipv4_prefix/effective/expires keys, one per CIDR in the
+    account's current outbound whitelist. Returns [] on any failure or
+    unexpected shape (metadata function, no user input involved) rather than
+    raising, matching every other SHOW/SYSTEM$-backed helper above."""
+    try:
+        rows = execute_sql("SELECT SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES() AS ranges")
+        if not rows:
+            return []
+        raw = rows[0].get("RANGES")
+        if raw is None:
+            return []
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        return data if isinstance(data, list) else []
+    except Exception:
+        logger.warning("get_egress_ip_ranges failed", exc_info=True)
+        return []
+
+
+def send_email(integration: str, recipients: str, subject: str, body: str) -> None:
+    """SYSTEM$SEND_EMAIL via a notification integration the consumer created
+    and granted USAGE to this application (see the Setup page's "Email
+    alerts" section) - `integration` is a plain string argument to the
+    function, not an identifier position, so no DDL-identifier validation is
+    needed here; `recipients` is a comma-separated string of verified
+    same-account user emails."""
+    execute_sql(
+        "SELECT SYSTEM$SEND_EMAIL(%s, %s, %s, %s)",
+        (integration, recipients, subject, body),
+    )

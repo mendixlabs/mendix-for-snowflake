@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import threading
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 
 from app import main
 from app.models import ResourceTier, RESOURCE_TIERS
@@ -347,3 +350,281 @@ class TestPollStatus:
         state = self._clock(monkeypatch)
         monkeypatch.setattr(main.sf, "show_service_status", lambda name: "STARTING")
         assert main._poll_status("svc", "RUNNING", timeout_secs=25) is False
+
+    def test_on_tick_called_each_non_matching_iteration_with_elapsed(self, monkeypatch):
+        # WS3: _run_lifecycle_task uses this to drive the in-memory progress
+        # text ("waiting for {target} ({elapsed}s)"). on_tick must never fire
+        # on the iteration that actually matches (no "waiting" caption once
+        # the app is already there).
+        state = self._clock(monkeypatch)
+        statuses = iter(["STARTING", "STARTING", "RUNNING"])
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: next(statuses))
+        ticks = []
+        assert main._poll_status("svc", "RUNNING", timeout_secs=100, on_tick=ticks.append) is True
+        assert ticks == [0, 10]
+
+    def test_on_tick_not_called_on_immediate_match(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "RUNNING")
+        ticks = []
+        assert main._poll_status("svc", "RUNNING", timeout_secs=100, on_tick=ticks.append) is True
+        assert ticks == []
+
+
+class TestContainersAllReady:
+    def test_empty_list_not_ready(self):
+        assert main._containers_all_ready([]) is False
+
+    def test_single_ready_row(self):
+        assert main._containers_all_ready([{"container_name": "mendix-app", "status": "READY"}]) is True
+
+    def test_one_of_two_not_ready(self):
+        containers = [
+            {"container_name": "mendix-app", "status": "READY"},
+            {"container_name": "sidecar", "status": "PENDING"},
+        ]
+        assert main._containers_all_ready(containers) is False
+
+    def test_status_matched_case_insensitively(self):
+        assert main._containers_all_ready([{"container_name": "mendix-app", "status": "ready"}]) is True
+
+
+class TestContainerFailureDetail:
+    def test_no_non_ready_rows_returns_none(self):
+        assert main._container_failure_detail([{"container_name": "mendix-app", "status": "READY"}]) is None
+
+    def test_empty_list_returns_none(self):
+        assert main._container_failure_detail([]) is None
+
+    def test_includes_status_and_message(self):
+        containers = [{"container_name": "mendix-app", "status": "FAILED",
+                       "message": "User application error, check container logs"}]
+        detail = main._container_failure_detail(containers)
+        assert detail == "mendix-app: FAILED - User application error, check container logs"
+
+    def test_falls_back_when_message_missing(self):
+        containers = [{"container_name": "mendix-app", "status": "PENDING", "message": None}]
+        assert main._container_failure_detail(containers) == "mendix-app: PENDING"
+
+
+class TestPollReady:
+    def _clock(self, monkeypatch):
+        state = {"t": 0.0, "sleeps": []}
+
+        def fake_time():
+            return state["t"]
+
+        def fake_sleep(secs):
+            state["sleeps"].append(secs)
+            state["t"] += secs
+
+        monkeypatch.setattr(main.time, "time", fake_time)
+        monkeypatch.setattr(main.time, "sleep", fake_sleep)
+        return state
+
+    def test_running_and_ready_immediately_zero_sleeps(self, monkeypatch):
+        state = self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "RUNNING")
+        monkeypatch.setattr(
+            main.sf, "show_service_containers",
+            lambda name: [{"container_name": "mendix-app", "status": "READY", "message": None}],
+        )
+        assert main._poll_ready("svc", "RUNNING", timeout_secs=100) == (True, None)
+        assert state["sleeps"] == []
+
+    def test_non_running_target_never_calls_show_service_containers(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "SUSPENDED")
+        calls = []
+        monkeypatch.setattr(main.sf, "show_service_containers", lambda name: calls.append(name) or [])
+        assert main._poll_ready("svc", "SUSPENDED", timeout_secs=100) == (True, None)
+        assert calls == []
+
+    def test_service_never_reaches_target_falls_back_to_none_detail(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "STARTING")
+        assert main._poll_ready("svc", "RUNNING", timeout_secs=20) == (False, None)
+
+    def test_containers_never_ready_times_out_with_container_detail(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "RUNNING")
+        monkeypatch.setattr(
+            main.sf, "show_service_containers",
+            lambda name: [{"container_name": "mendix-app", "status": "FAILED",
+                          "message": "User application error, check container logs"}],
+        )
+        ok, detail = main._poll_ready("svc", "RUNNING", timeout_secs=20)
+        assert ok is False
+        assert "User application error, check container logs" in detail
+
+    def test_empty_container_list_never_ready_falls_back_to_none_detail(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "RUNNING")
+        monkeypatch.setattr(main.sf, "show_service_containers", lambda name: [])
+        assert main._poll_ready("svc", "RUNNING", timeout_secs=20) == (False, None)
+
+    def test_containers_become_ready_before_deadline_succeeds(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "RUNNING")
+        states = iter([
+            [],
+            [{"container_name": "mendix-app", "status": "RUNNING", "message": None}],
+            [{"container_name": "mendix-app", "status": "READY", "message": None}],
+        ])
+        monkeypatch.setattr(main.sf, "show_service_containers", lambda name: next(states))
+        assert main._poll_ready("svc", "RUNNING", timeout_secs=100) == (True, None)
+
+    def test_on_tick_ready_fires_during_container_phase_not_before(self, monkeypatch):
+        self._clock(monkeypatch)
+        monkeypatch.setattr(main.sf, "show_service_status", lambda name: "RUNNING")
+        states = iter([
+            [{"container_name": "mendix-app", "status": "RUNNING", "message": None}],
+            [{"container_name": "mendix-app", "status": "READY", "message": None}],
+        ])
+        monkeypatch.setattr(main.sf, "show_service_containers", lambda name: next(states))
+        status_ticks, ready_ticks = [], []
+        ok, _ = main._poll_ready("svc", "RUNNING", timeout_secs=100,
+                                 on_tick=status_ticks.append, on_tick_ready=ready_ticks.append)
+        assert ok is True
+        assert status_ticks == []  # service was already RUNNING - no status-phase ticks
+        assert ready_ticks == [0]
+
+
+class TestIsPlatformStale:
+    def test_matching_image_not_stale(self, make_record):
+        record = make_record(platform_image=main.MENDIX_BASE_IMAGE)
+        assert main._is_platform_stale(record) is False
+
+    def test_older_image_stale(self, make_record):
+        record = make_record(platform_image="/repo/mendix-base:old")
+        assert main._is_platform_stale(record) is True
+
+    def test_null_image_never_deployed_not_stale(self, make_record):
+        record = make_record(platform_image=None, last_deployed_at=None)
+        assert main._is_platform_stale(record) is False
+
+    def test_null_image_but_previously_deployed_is_stale(self, make_record):
+        # A row from before platform_image stamping existed: it has genuinely
+        # deployed (last_deployed_at set) but has no recorded image, so its
+        # actual staleness is unknown - treat as stale rather than assume current.
+        record = make_record(platform_image=None, last_deployed_at="2026-01-01T00:00:00+00:00")
+        assert main._is_platform_stale(record) is True
+
+
+class TestRefreshPlatformStaleness:
+    def test_stale_app_gets_flagged(self, fake_registry, make_record):
+        record = make_record(name="stale-app", platform_image="/repo/mendix-base:old",
+                             last_deployed_at="2026-01-01T00:00:00+00:00",
+                             platform_update_available=False)
+        fake_registry.add(record)
+        main._refresh_platform_staleness()
+        assert fake_registry.get_app("stale-app").platform_update_available is True
+
+    def test_current_app_stays_unflagged(self, fake_registry, make_record):
+        record = make_record(name="current-app", platform_image=main.MENDIX_BASE_IMAGE,
+                             last_deployed_at="2026-01-01T00:00:00+00:00",
+                             platform_update_available=False)
+        fake_registry.add(record)
+        main._refresh_platform_staleness()
+        assert fake_registry.get_app("current-app").platform_update_available is False
+
+    def test_never_deployed_app_not_flagged(self, fake_registry, make_record):
+        record = make_record(name="new-app", platform_image=None, last_deployed_at=None,
+                             last_deploy_status="NOT_DEPLOYED", platform_update_available=False)
+        fake_registry.add(record)
+        main._refresh_platform_staleness()
+        assert fake_registry.get_app("new-app").platform_update_available is False
+
+    def test_writes_only_when_value_changes(self, fake_registry, make_record):
+        # An app already correctly flagged/unflagged must not trigger a
+        # redundant registry write on every controller startup.
+        already_flagged = make_record(name="already-flagged", platform_image="/repo/mendix-base:old",
+                                      last_deployed_at="2026-01-01T00:00:00+00:00",
+                                      platform_update_available=True)
+        already_current = make_record(name="already-current", platform_image=main.MENDIX_BASE_IMAGE,
+                                      last_deployed_at="2026-01-01T00:00:00+00:00",
+                                      platform_update_available=False)
+        fake_registry.add(already_flagged)
+        fake_registry.add(already_current)
+        main._refresh_platform_staleness()
+        assert fake_registry.updates == []
+
+
+class TestComposeEaiNames:
+    def test_pg_eai_always_first_even_with_no_slots(self):
+        assert main._compose_eai_names([]) == [main.PG_EAI]
+
+
+class TestLifespanEgressTask:
+    """conftest's autouse _noop_egress_loop replaces egress_watch.run_loop for
+    every other test (so route/registry tests don't race the background task -
+    see that fixture's docstring); here it's overridden again with a fake that
+    records start/cancel so lifespan's own task wiring gets its own direct
+    check, independent of egress_watch's own run_loop tests
+    (test_egress_watch_unit.py)."""
+
+    def test_task_started_and_cancelled_around_lifespan(
+        self, monkeypatch, fake_registry, fake_activity, fake_deploy_history, fake_pg_admin
+    ):
+        events: list[str] = []
+        # TestClient's lifespan runs on a separate thread's event loop; a plain
+        # asyncio.create_task doesn't guarantee its body has actually started by
+        # the time this (synchronous) test resumes, so synchronize explicitly
+        # rather than relying on incidental scheduling.
+        started = threading.Event()
+
+        async def fake_run_loop():
+            events.append("started")
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                events.append("cancelled")
+                raise
+
+        monkeypatch.setattr(main.egress_watch, "run_loop", fake_run_loop)
+        with TestClient(main.app):
+            assert started.wait(timeout=5), "egress background task never started"
+        assert events == ["started", "cancelled"]
+
+    def test_bound_slot_appended_after_pg_eai(self, monkeypatch):
+        monkeypatch.setattr(main, "BOUND_EAI_SLOTS", {"app_eai_1": "REAL_APP_EAI_1"})
+        assert main._compose_eai_names(["app_eai_1"]) == [main.PG_EAI, "REAL_APP_EAI_1"]
+
+    def test_multiple_bound_slots_preserve_request_order(self, monkeypatch):
+        monkeypatch.setattr(main, "BOUND_EAI_SLOTS", {
+            "app_eai_1": "REAL_1", "app_eai_2": "REAL_2", "app_eai_3": "REAL_3",
+        })
+        assert main._compose_eai_names(["app_eai_3", "app_eai_1"]) == [main.PG_EAI, "REAL_3", "REAL_1"]
+
+    def test_unbound_slot_silently_filtered(self, monkeypatch):
+        # A slot requested/recorded when it was bound but has since been unbound
+        # (e.g. an old deploy-history row replayed via rollback) must not raise -
+        # it's simply dropped from the composed list.
+        monkeypatch.setattr(main, "BOUND_EAI_SLOTS", {})
+        assert main._compose_eai_names(["app_eai_1"]) == [main.PG_EAI]
+
+    def test_pg_eai_present_even_when_a_slot_named_pg_eai_would_collide(self, monkeypatch):
+        # PG_EAI is prepended unconditionally, independent of BOUND_EAI_SLOTS
+        # content, so nothing in the requested slots can ever crowd it out.
+        monkeypatch.setattr(main, "BOUND_EAI_SLOTS", {"app_eai_1": "REAL_1"})
+        result = main._compose_eai_names(["app_eai_1"])
+        assert result[0] == main.PG_EAI
+        assert result == [main.PG_EAI, "REAL_1"]
+
+
+class TestTruncate:
+    def test_under_limit_unchanged(self):
+        assert main._truncate("short") == "short"
+
+    def test_exactly_at_limit_unchanged(self):
+        text = "x" * 500
+        assert main._truncate(text) == text
+
+    def test_one_over_limit_truncated_with_marker(self):
+        text = "x" * 501
+        result = main._truncate(text)
+        assert result == "x" * 500 + "...(truncated)"
+
+    def test_custom_limit(self):
+        assert main._truncate("abcdef", limit=3) == "abc...(truncated)"

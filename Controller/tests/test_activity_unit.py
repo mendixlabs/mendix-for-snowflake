@@ -46,6 +46,14 @@ class TestDeriveAction:
         assert activity.derive_action("PATCH", "/system/compute-pool") == \
             ("resize_compute_pool", None)
 
+    def test_acknowledge_egress(self):
+        assert activity.derive_action("POST", "/system/egress-ack") == \
+            ("acknowledge_egress", None)
+
+    def test_set_egress_alert_config(self):
+        assert activity.derive_action("POST", "/system/egress-alert-config") == \
+            ("set_egress_alert_config", None)
+
     def test_unknown_path(self):
         assert activity.derive_action("GET", "/nonsense") == ("unknown", None)
 

@@ -101,6 +101,12 @@ class ControllerClient:
     def get_app(self, name: str) -> dict:
         return self._request("GET", f"/apps/{name}").json()
 
+    def get_progress(self, name: str) -> dict:
+        return self._request("GET", f"/apps/{name}/progress").json()
+
+    def get_health(self, name: str) -> dict:
+        return self._request("GET", f"/apps/{name}/health").json()
+
     def create_app(self, payload: dict) -> dict:
         return self._request("POST", "/apps", json=payload).json()
 
@@ -126,11 +132,21 @@ class ControllerClient:
     def trigger_deploy(self, name: str) -> dict:
         return self._request("POST", f"/apps/{name}/trigger-deploy").json()
 
+    def list_history(self, name: str) -> list[dict]:
+        return self._request("GET", f"/apps/{name}/history").json().get("history", [])
+
+    def rollback(self, name: str, entry_id: int | None = None) -> dict:
+        payload = {"entry_id": entry_id} if entry_id is not None else None
+        return self._request("POST", f"/apps/{name}/rollback", json=payload).json()
+
     def update_constants(self, name: str, constants: dict) -> dict:
         return self._request("PUT", f"/apps/{name}/constants", json={"constants": constants}).json()
 
     def update_spec(self, name: str, payload: dict) -> dict:
         return self._request("PUT", f"/apps/{name}/spec", json=payload).json()
+
+    def apply_platform_update(self, name: str) -> dict:
+        return self._request("POST", f"/apps/{name}/platform-update").json()
 
     def update_license(self, name: str, license_id: str, license_key: str) -> dict:
         return self._request(
@@ -171,6 +187,12 @@ class ControllerClient:
     def get_compute_pool(self) -> dict:
         return self._request("GET", "/system/compute-pool").json()
 
+    def get_external_access_slots(self) -> list[dict]:
+        return self._request("GET", "/system/external-access").json().get("slots", [])
+
+    def update_external_access(self, name: str, slots: list[str]) -> dict:
+        return self._request("PUT", f"/apps/{name}/external-access", json={"slots": slots}).json()
+
     def get_pg_info(self) -> dict:
         return self._request("GET", "/system/pg-info").json()
 
@@ -189,3 +211,20 @@ class ControllerClient:
         if auto_suspend_secs is not None:
             body["auto_suspend_secs"] = auto_suspend_secs
         return self._request("PATCH", "/system/compute-pool", json=body).json()
+
+    def get_egress_status(self) -> dict:
+        return self._request("GET", "/system/egress-status").json()
+
+    def ack_egress(self, through_date: str) -> dict:
+        return self._request("POST", "/system/egress-ack", json={"through_date": through_date}).json()
+
+    def set_egress_alert_config(self, integration_name: str, recipients: list[str]) -> dict:
+        return self._request(
+            "POST", "/system/egress-alert-config",
+            json={"integration_name": integration_name, "recipients": recipients},
+        ).json()
+
+    def get_egress_warning(self) -> dict:
+        """Cheap unprivileged signal for the Apps-page banner - see
+        Controller/app/main.py's GET /system/egress-warning."""
+        return self._request("GET", "/system/egress-warning").json()

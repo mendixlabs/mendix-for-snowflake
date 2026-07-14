@@ -222,6 +222,50 @@ class TestExecuteSqlStatementTimeout:
         assert timeout == sf._STATEMENT_TIMEOUT_SECS
 
 
+class TestShowServiceContainers:
+    def test_parses_relevant_fields(self, fake_execute_sql):
+        fake_execute_sql.returns = [[
+            {"service_name": "MYAPP_SERVICE", "instance_id": "0", "container_name": "mendix-app",
+             "status": "READY", "message": None, "image_digest": "sha256:abc", "restart_count": 0},
+        ]]
+        rows = sf.show_service_containers("MYAPP_SERVICE")
+        sql, params = fake_execute_sql.calls[0]
+        assert sql == "SHOW SERVICE CONTAINERS IN SERVICE TESTDB.PUBLIC.MYAPP_SERVICE"
+        assert rows == [{"container_name": "mendix-app", "status": "READY", "message": None}]
+
+    def test_multiple_containers(self, fake_execute_sql):
+        fake_execute_sql.returns = [[
+            {"container_name": "mendix-app", "status": "RUNNING", "message": "starting"},
+            {"container_name": "sidecar", "status": "READY", "message": None},
+        ]]
+        rows = sf.show_service_containers("MYAPP_SERVICE")
+        assert [r["container_name"] for r in rows] == ["mendix-app", "sidecar"]
+
+    def test_no_rows_returns_empty_list(self, fake_execute_sql):
+        fake_execute_sql.returns = [[]]
+        assert sf.show_service_containers("MYAPP_SERVICE") == []
+
+    def test_swallows_exceptions(self, monkeypatch):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        assert sf.show_service_containers("MYAPP_SERVICE") == []
+
+    def test_swallows_exceptions_but_logs_warning(self, monkeypatch, caplog):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        with caplog.at_level(logging.WARNING, logger="app.snowflake_client"):
+            result = sf.show_service_containers("MYAPP_SERVICE")
+        assert result == []
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert "MYAPP_SERVICE" in caplog.records[0].getMessage()
+        assert caplog.records[0].exc_info is not None
+
+
 class TestGetServiceEndpoint:
     def test_provisioning_message_skipped(self, fake_execute_sql):
         fake_execute_sql.returns = [[{"ingress_url": "Endpoints provisioning in progress. Please wait."}]]
@@ -288,7 +332,7 @@ class TestAlterComputePool:
 
 class TestServiceLifecycleSql:
     def test_create_service_sql(self, fake_execute_sql):
-        sf.create_service("MYAPP_SERVICE", "spec: yaml", "TEST_POOL", "TEST_EAI", "TEST_WH")
+        sf.create_service("MYAPP_SERVICE", "spec: yaml", "TEST_POOL", ["TEST_EAI"], "TEST_WH")
         sql, params = fake_execute_sql.calls[0]
         assert "CREATE SERVICE TESTDB.PUBLIC.MYAPP_SERVICE" in sql
         assert "IN COMPUTE POOL TEST_POOL" in sql
@@ -296,10 +340,15 @@ class TestServiceLifecycleSql:
         assert "EXTERNAL_ACCESS_INTEGRATIONS = (TEST_EAI)" in sql
         assert "QUERY_WAREHOUSE = TEST_WH" in sql
 
+    def test_create_service_multiple_eai_names_joined(self, fake_execute_sql):
+        sf.create_service("MYAPP_SERVICE", "spec: yaml", "TEST_POOL", ["TEST_EAI", "APP_EAI_1"], "TEST_WH")
+        sql, params = fake_execute_sql.calls[0]
+        assert "EXTERNAL_ACCESS_INTEGRATIONS = (TEST_EAI, APP_EAI_1)" in sql
+
     def test_create_service_grants_monitor_to_app_admin(self, fake_execute_sql):
         # Without this, get_service_logs() 403s for every caller: a freshly
         # created service is owned by the application, not app_admin.
-        sf.create_service("MYAPP_SERVICE", "spec: yaml", "TEST_POOL", "TEST_EAI", "TEST_WH")
+        sf.create_service("MYAPP_SERVICE", "spec: yaml", "TEST_POOL", ["TEST_EAI"], "TEST_WH")
         sql, params = fake_execute_sql.calls[1]
         assert sql == "GRANT MONITOR ON SERVICE TESTDB.PUBLIC.MYAPP_SERVICE TO APPLICATION ROLE app_admin"
 
@@ -307,6 +356,14 @@ class TestServiceLifecycleSql:
         sf.alter_service_spec("MYAPP_SERVICE", "spec: yaml")
         sql, params = fake_execute_sql.calls[0]
         assert sql == "ALTER SERVICE TESTDB.PUBLIC.MYAPP_SERVICE FROM SPECIFICATION $$spec: yaml$$"
+
+    def test_set_service_external_access_sql(self, fake_execute_sql):
+        sf.set_service_external_access("MYAPP_SERVICE", ["TEST_EAI", "APP_EAI_1"])
+        sql, params = fake_execute_sql.calls[0]
+        assert sql == (
+            "ALTER SERVICE TESTDB.PUBLIC.MYAPP_SERVICE "
+            "SET EXTERNAL_ACCESS_INTEGRATIONS = (TEST_EAI, APP_EAI_1)"
+        )
 
     def test_suspend_service_sql(self, fake_execute_sql):
         sf.suspend_service("MYAPP_SERVICE")
@@ -358,6 +415,71 @@ class TestServiceLifecycleSql:
             "name": "TEST_POOL", "state": "ACTIVE", "min_nodes": 1, "max_nodes": 2,
             "instance_family": "CPU_X64_XS", "auto_suspend_secs": 600, "num_services": 1,
         }
+
+
+class TestConfigKeyValue:
+    def test_get_config_returns_value(self, fake_execute_sql):
+        fake_execute_sql.returns = [[{"CONFIG_VALUE": "2026-09-07T00:00:00+00:00"}]]
+        assert sf.get_config("egress_min_expiry") == "2026-09-07T00:00:00+00:00"
+        sql, params = fake_execute_sql.calls[0]
+        assert "internal_config" in sql
+        assert params == ("egress_min_expiry",)
+
+    def test_get_config_missing_key_returns_none(self, fake_execute_sql):
+        fake_execute_sql.returns = [[]]
+        assert sf.get_config("never_set") is None
+
+    def test_set_config_merges_upsert(self, fake_execute_sql):
+        sf.set_config("egress_min_expiry", "2026-09-07T00:00:00+00:00")
+        sql, params = fake_execute_sql.calls[0]
+        assert "MERGE INTO" in sql
+        assert params == ("egress_min_expiry", "2026-09-07T00:00:00+00:00")
+
+    def test_set_config_none_deletes(self, fake_execute_sql):
+        sf.set_config("egress_alert_integration", None)
+        sql, params = fake_execute_sql.calls[0]
+        assert sql.strip().startswith("DELETE FROM")
+        assert params == ("egress_alert_integration",)
+
+
+class TestGetEgressIpRanges:
+    def test_parses_json_string_result(self, fake_execute_sql):
+        fake_execute_sql.returns = [[{
+            "RANGES": '[{"ipv4_prefix": "1.2.3.0/24", "effective": "2026-01-01T00:00:00Z", '
+                      '"expires": "2026-09-07T00:00:00Z"}]',
+        }]]
+        ranges = sf.get_egress_ip_ranges()
+        assert ranges == [{
+            "ipv4_prefix": "1.2.3.0/24", "effective": "2026-01-01T00:00:00Z",
+            "expires": "2026-09-07T00:00:00Z",
+        }]
+
+    def test_no_rows_returns_empty_list(self, fake_execute_sql):
+        fake_execute_sql.returns = [[]]
+        assert sf.get_egress_ip_ranges() == []
+
+    def test_null_column_returns_empty_list(self, fake_execute_sql):
+        fake_execute_sql.returns = [[{"RANGES": None}]]
+        assert sf.get_egress_ip_ranges() == []
+
+    def test_non_list_json_returns_empty_list(self, fake_execute_sql):
+        fake_execute_sql.returns = [[{"RANGES": '{"not": "a list"}'}]]
+        assert sf.get_egress_ip_ranges() == []
+
+    def test_swallows_exceptions(self, monkeypatch):
+        def raiser(sql, params=()):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sf, "execute_sql", raiser)
+        assert sf.get_egress_ip_ranges() == []
+
+
+class TestSendEmail:
+    def test_uses_bound_params(self, fake_execute_sql):
+        sf.send_email("MY_INT", "a@example.com,b@example.com", "subject line", "body text")
+        sql, params = fake_execute_sql.calls[0]
+        assert "SYSTEM$SEND_EMAIL" in sql
+        assert params == ("MY_INT", "a@example.com,b@example.com", "subject line", "body text")
 
 
 class TestMisc:

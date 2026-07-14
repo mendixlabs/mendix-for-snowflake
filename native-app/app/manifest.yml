@@ -78,3 +78,42 @@ references:
       object_type: EXTERNAL_ACCESS_INTEGRATION                   # underscores - validated correct (Cortex was wrong)
       register_callback: app_public.register_reference
       configuration_callback: app_public.get_reference_config   # required for EAI refs
+  # Four optional per-app egress slots (app_eai_1..4). Snowflake does not allow
+  # multi_valued: true on an EXTERNAL_ACCESS_INTEGRATION reference, so a deployed
+  # Mendix app needing more than one outbound integration needs multiple declared
+  # single-valued slots instead of one multi-valued reference - see the plan's
+  # "Key research facts". Each is independently optional: an app can be created
+  # and deployed with zero, one, or several bound; unbound slots simply never
+  # appear as a controller env var (see start_controller in setup_script.sql).
+  - app_eai_1:
+      label: "App egress integration 1 (optional)"
+      description: "External access integration a deployed Mendix app may attach to for outbound network access"
+      privileges:
+        - USAGE
+      object_type: EXTERNAL_ACCESS_INTEGRATION
+      register_callback: app_public.register_reference
+      configuration_callback: app_public.get_reference_config
+  - app_eai_2:
+      label: "App egress integration 2 (optional)"
+      description: "External access integration a deployed Mendix app may attach to for outbound network access"
+      privileges:
+        - USAGE
+      object_type: EXTERNAL_ACCESS_INTEGRATION
+      register_callback: app_public.register_reference
+      configuration_callback: app_public.get_reference_config
+  - app_eai_3:
+      label: "App egress integration 3 (optional)"
+      description: "External access integration a deployed Mendix app may attach to for outbound network access"
+      privileges:
+        - USAGE
+      object_type: EXTERNAL_ACCESS_INTEGRATION
+      register_callback: app_public.register_reference
+      configuration_callback: app_public.get_reference_config
+  - app_eai_4:
+      label: "App egress integration 4 (optional)"
+      description: "External access integration a deployed Mendix app may attach to for outbound network access"
+      privileges:
+        - USAGE
+      object_type: EXTERNAL_ACCESS_INTEGRATION
+      register_callback: app_public.register_reference
+      configuration_callback: app_public.get_reference_config
