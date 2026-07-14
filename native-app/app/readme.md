@@ -40,6 +40,36 @@ Every app container connects as its own per-app role - never as the shared
 `application` bootstrap credential above, which the controller holds and
 never mounts into an app container.
 
+## Optional per-app external access (`app_eai_1..4`)
+
+Deployed Mendix apps have no outbound network access beyond Postgres by
+default. Four optional external-access-integration slots let an app reach
+other APIs:
+
+- **Four slots.** `app_eai_1` through `app_eai_4` are four separate slots you
+  can bind an integration to.
+- **Shared across the whole installation, not per Mendix app.** Binding a
+  slot (Setup page, or `register_reference`) is a one-time, install-wide
+  action. Register several Mendix apps inside one installation and they all
+  draw from the same four bound integrations; none of them gets a private
+  slot.
+- **No self-service fifth slot.** Adding a 5th requires a provider-side
+  manifest change and a new app version. A consumer cannot create additional
+  slots themselves.
+- **One slot can cover a lot of ground.** An external access integration is
+  built on a network rule, and a network rule's `VALUE_LIST` can hold many
+  hosts and ports at once. Group everything an app needs to reach (say, every
+  internal API on the same network boundary) under one rule and bind that as
+  a single slot, instead of giving each destination its own. The same bound
+  integration can also be attached to more than one Mendix app at a time, so
+  app A and app B can both attach to `app_eai_1` simultaneously.
+
+Bind a slot on the **Setup / Verify** page (step 7), then attach individual
+apps to it from the Register page (new apps) or the Apps page's External
+access panel (existing apps). Binding a slot restarts the controller and
+admin UI (they re-specify to pick up the new `APP_EAI_N` env var); attaching
+or detaching one app from a slot restarts only that app's own service.
+
 ## Required Snowflake role
 
 **ACCOUNTADMIN is not required.** Every privilege above, plus installing the app

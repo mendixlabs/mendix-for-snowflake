@@ -94,4 +94,16 @@ def apply_branding() -> None:
     after st.set_page_config. Idempotent within a rerun."""
     st.logo(_LOGO_PATH, size="large")
     st.markdown(_CSS, unsafe_allow_html=True)
-    components.html(_SKIP_TOOLTIP_TAB_STOPS_JS, height=0)
+    # components.html reuses the same iframe DOM node across reruns when its
+    # content is unchanged, so an unqualified call only mounts (and only runs
+    # the script inside) once per browser session. If that one mount is lost -
+    # a dropped WebSocket during a cold container start or a redeploy landing
+    # mid-session - the tooltip-tab-order fix below never applies for the rest
+    # of the session, with nothing visibly wrong to notice. A per-rerun counter
+    # in the HTML forces a fresh mount (and therefore a fresh attempt) on every
+    # single rerun, so a lost mount just gets retried on the next interaction.
+    st.session_state["_tooltip_fix_rerun"] = st.session_state.get("_tooltip_fix_rerun", 0) + 1
+    components.html(
+        _SKIP_TOOLTIP_TAB_STOPS_JS + f"<!-- rerun {st.session_state['_tooltip_fix_rerun']} -->",
+        height=0,
+    )
