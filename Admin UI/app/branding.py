@@ -15,7 +15,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 _LOGO_PATH = str((Path(__file__).parent / "assets" / "siemens-logo-white.svg").resolve())
 
@@ -61,6 +60,7 @@ html, body, [data-testid="stAppViewContainer"], .stApp,
 # newly-rendered icons across reruns and page switches, so it only needs to
 # be injected once.
 _SKIP_TOOLTIP_TAB_STOPS_JS = """
+<style>body{margin:0;overflow:hidden}</style>
 <script>
   const doc = window.parent.document;
   // Natively-focusable tags need no explicit tabindex attribute (a plain
@@ -76,15 +76,21 @@ _SKIP_TOOLTIP_TAB_STOPS_JS = """
     });
   };
   detab();
-  if (!doc.__mendixTooltipObserver) {
-    doc.__mendixTooltipObserver = new MutationObserver(detab);
-    // attributes:true too - React re-applies its own tabIndex prop on
-    // rerender without necessarily removing/reinserting the node, which a
-    // childList-only observer would miss.
-    doc.__mendixTooltipObserver.observe(doc.body, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['tabindex'],
-    });
-  }
+  // Disconnect + recreate on every mount rather than "create once, ever":
+  // this script forces a fresh mount on every rerun (see the Python-side
+  // comment on the rerun counter), so a create-once observer that turns out
+  // to be watching a target that's gone stale - e.g. it was attached on a
+  // different page before the user navigated here - would otherwise never
+  // get a second chance to re-attach for the rest of the browser session.
+  // Recreating it every time this script runs makes that self-healing.
+  if (doc.__mendixTooltipObserver) doc.__mendixTooltipObserver.disconnect();
+  doc.__mendixTooltipObserver = new MutationObserver(detab);
+  // attributes:true too - React re-applies its own tabIndex prop on
+  // rerender without necessarily removing/reinserting the node, which a
+  // childList-only observer would miss.
+  doc.__mendixTooltipObserver.observe(doc.body, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['tabindex'],
+  });
 </script>
 """
 
@@ -94,16 +100,16 @@ def apply_branding() -> None:
     after st.set_page_config. Idempotent within a rerun."""
     st.logo(_LOGO_PATH, size="large")
     st.markdown(_CSS, unsafe_allow_html=True)
-    # components.html reuses the same iframe DOM node across reruns when its
-    # content is unchanged, so an unqualified call only mounts (and only runs
-    # the script inside) once per browser session. If that one mount is lost -
+    # st.iframe reuses the same iframe DOM node across reruns when its content
+    # is unchanged, so an unqualified call only mounts (and only runs the
+    # script inside) once per browser session. If that one mount is lost -
     # a dropped WebSocket during a cold container start or a redeploy landing
     # mid-session - the tooltip-tab-order fix below never applies for the rest
     # of the session, with nothing visibly wrong to notice. A per-rerun counter
     # in the HTML forces a fresh mount (and therefore a fresh attempt) on every
     # single rerun, so a lost mount just gets retried on the next interaction.
     st.session_state["_tooltip_fix_rerun"] = st.session_state.get("_tooltip_fix_rerun", 0) + 1
-    components.html(
+    st.iframe(
         _SKIP_TOOLTIP_TAB_STOPS_JS + f"<!-- rerun {st.session_state['_tooltip_fix_rerun']} -->",
-        height=0,
+        height=1,
     )

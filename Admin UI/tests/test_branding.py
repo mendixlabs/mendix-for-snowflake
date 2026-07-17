@@ -7,8 +7,8 @@ import branding
 
 class TestApplyBranding:
     def test_tooltip_script_html_differs_every_call(self, monkeypatch):
-        """components.html reuses its iframe DOM node across reruns when the
-        HTML argument is unchanged, which silently stops the tooltip-tab-order
+        """st.iframe reuses its iframe DOM node across reruns when the HTML
+        argument is unchanged, which silently stops the tooltip-tab-order
         script from ever running again if a single mount is lost (dropped
         WebSocket during a cold start, a redeploy mid-session). Each call must
         pass different HTML so the frontend always treats it as a fresh
@@ -17,7 +17,7 @@ class TestApplyBranding:
         monkeypatch.setattr(branding.st, "logo", lambda *a, **k: None)
         monkeypatch.setattr(branding.st, "markdown", lambda *a, **k: None)
         seen = []
-        monkeypatch.setattr(branding.components, "html", lambda html, **k: seen.append(html))
+        monkeypatch.setattr(branding.st, "iframe", lambda html, **k: seen.append(html))
 
         branding.apply_branding()
         branding.apply_branding()
@@ -36,7 +36,7 @@ class TestApplyBranding:
         st.session_state.clear()
         monkeypatch.setattr(branding.st, "logo", lambda *a, **k: None)
         monkeypatch.setattr(branding.st, "markdown", lambda *a, **k: None)
-        monkeypatch.setattr(branding.components, "html", lambda html, **k: None)
+        monkeypatch.setattr(branding.st, "iframe", lambda html, **k: None)
 
         branding.apply_branding()
         first = st.session_state["_tooltip_fix_rerun"]
