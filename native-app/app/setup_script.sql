@@ -25,6 +25,45 @@ CREATE APPLICATION ROLE IF NOT EXISTS app_admin;
 CREATE SCHEMA IF NOT EXISTS app_public;
 GRANT USAGE ON SCHEMA app_public TO APPLICATION ROLE app_admin;
 
+-- Cortex Code cannot read arbitrary files from an installed application package.
+-- Expose the required consumer setup as rows so an account-side assistant can
+-- load, execute, verify, and resume the runbook with ordinary SELECT semantics.
+-- AI-SETUP.md defines the execution rules and required workflow. Keep its step
+-- list and these version-specific instructions in sync in the same change.
+CREATE OR REPLACE SECURE VIEW app_public.ai_setup_steps AS
+SELECT column1::INTEGER AS step_number,
+       column2::VARCHAR AS title,
+       column3::VARCHAR AS instructions,
+       column4::BOOLEAN AS requires_approval,
+       column5::VARCHAR AS verify_sql
+FROM VALUES
+  (1, 'Collect inputs and check platform support',
+   $$Ask for the installed application name, operator role, object database and schema, and an object-name prefix. Confirm the account is on AWS or Azure because Snowflake-managed Postgres is unavailable on GCP. Use SHOW APPLICATIONS LIKE '<app_name>' and SELECT CURRENT_REGION(), CURRENT_ROLE(). Do not change the account in this step.$$,
+   FALSE,
+   $$SHOW APPLICATIONS LIKE '<app_name>'; SELECT CURRENT_REGION(), CURRENT_ROLE();$$),
+  (2, 'Create the Postgres instance and ingress policy',
+   $$Run SELECT SYSTEM$GET_SNOWFLAKE_EGRESS_IP_RANGES() first. Ask the user to confirm the returned CIDRs and resolved object names. Then create a POSTGRES_INGRESS network rule containing those CIDRs, a network policy using that rule, and a Postgres 17 instance with COMPUTE_FAMILY = 'STANDARD_M', STORAGE_SIZE_GB = 10, AUTHENTICATION_AUTHORITY = POSTGRES, and that network policy. The CREATE POSTGRES INSTANCE result contains credentials shown once. Do not display or retain them in chat; have the user capture them privately.$$,
+   TRUE,
+   $$SHOW POSTGRES INSTANCES LIKE '<pg_instance>'; SHOW NETWORK POLICIES LIKE '<pg_network_policy>';$$),
+  (3, 'Create Postgres egress',
+   $$Using the Postgres host and port, create a HOST_PORT EGRESS network rule in the consumer-owned object schema. Create an enabled external access integration whose ALLOWED_NETWORK_RULES contains that rule. Stop if either name already exists with a different definition.$$,
+   TRUE,
+   $$SHOW EXTERNAL ACCESS INTEGRATIONS LIKE '<pg_eai>'; SHOW NETWORK RULES LIKE '<pg_egress_rule>' IN SCHEMA <object_db>.<object_schema>;$$),
+  (4, 'Grant bootstrap Postgres privileges',
+   $$The application Postgres user needs CREATEDB and CREATEROLE so the controller can provision an isolated role and database per Mendix app. Reset access for snowflake_admin. Never expose the returned password in chat. Have the user privately create a temporary GENERIC_STRING secret and a one-instance PG_SETUP_JOB service in an existing consumer compute pool. Use EXTERNAL_ACCESS_INTEGRATIONS = (<pg_eai>) and image /<PROVIDER_DB>/<PROVIDER_SCHEMA>/<REPO>/mendix-base:latest. The job must connect with psql as snowflake_admin and run ALTER USER application CREATEROLE. Check SYSTEM$GET_SERVICE_LOGS for ALTER ROLE, then drop only the temporary service and secret created by this step.$$,
+   TRUE,
+   $$CALL SYSTEM$GET_SERVICE_LOGS('<object_db>.<object_schema>.PG_SETUP_JOB', '0', 'psql', 5);$$),
+  (5, 'Create the application Postgres secret',
+   $$Have the user run this step privately so no password enters chat or agent logs. Create a GENERIC_STRING secret in the consumer-owned object schema. Its SECRET_STRING is JSON with exactly two fields: host containing '<pg_host>:<pg_port>' and password containing the application Postgres password. Do not read the secret value back.$$,
+   TRUE,
+   $$SHOW SECRETS LIKE '<pg_secret>' IN SCHEMA <object_db>.<object_schema>;$$),
+  (6, 'Grant the app, bind references, and approve caller tokens',
+   $$Grant CREATE COMPUTE POOL, CREATE WAREHOUSE, and BIND SERVICE ENDPOINT on the account to application <app_name>. Grant <app_name>.app_admin to the operator role. Call <app_name>.app_public.grant_callback with those three privileges. Bind pg_secret with SYSTEM$REFERENCE privilege READ and pg_eai with privilege USAGE through <app_name>.app_public.register_reference. Run SHOW SPECIFICATIONS IN APPLICATION <app_name>, find CALLER_TOKEN_SPEC, show the resolved ALTER APPLICATION approval command, and ask before executing it with its sequence number.$$,
+   TRUE,
+   $$SHOW GRANTS TO APPLICATION <app_name>; SHOW SPECIFICATIONS IN APPLICATION <app_name>; SHOW SERVICES IN APPLICATION <app_name>;$$);
+
+GRANT SELECT ON VIEW app_public.ai_setup_steps TO APPLICATION ROLE app_admin;
+
 -- -----------------------------------------------------------------------------
 -- 2. App registry + activity audit log
 --    The app role owns these, so no per-table GRANTs are needed.

@@ -32,6 +32,30 @@ These are account-level objects the app cannot create for itself. The admin UI's
    for each Mendix app you register).
 4. Create the secret with the Postgres credentials, then bind it as `pg_secret`.
 
+### Set up with Cortex Code
+
+After installing the application, grant its `app_admin` application role to the
+role used by Cortex Code, then ask Cortex Code to load the built-in setup runbook:
+
+```sql
+GRANT APPLICATION ROLE <app_name>.app_admin TO ROLE <operator_role>;
+
+SELECT step_number, title, instructions, requires_approval, verify_sql
+FROM <app_name>.app_public.ai_setup_steps
+ORDER BY step_number;
+```
+
+Suggested prompt:
+
+> Load the setup steps from the installed application. Show me the plan first,
+> follow the steps in order, ask before every step marked `requires_approval`,
+> never put a password in chat or logs, and run each verification before moving on.
+
+The view is available immediately after installation. It does not depend on the
+Postgres references or container services being ready. `AI-SETUP.md` in the
+application source defines the agent safety and reporting rules; the view is the
+consumer-accessible executable version.
+
 ## Per-app Postgres isolation
 
 Each Mendix app gets its own Postgres role and password, scoped to only that
