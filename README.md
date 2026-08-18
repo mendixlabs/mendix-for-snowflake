@@ -2,6 +2,12 @@
 
 Run Mendix applications natively on Snowflake using Snowpark Container Services (SPCS). No Mendix Cloud, no Kubernetes operator, no external infrastructure. The Mendix runtime runs as a container inside Snowflake, connected to a Snowflake-managed Postgres database, with file storage on Snowflake stages. Users authenticate via Snowflake identity and can query Snowflake data as themselves.
 
+## Convert a Streamlit app to Mendix with AI
+
+The [Snowflake Streamlit to Mendix AI Skill](https://github.com/mendixlabs/SnowflakeStreamlit2Mendix-Skill)
+guides an AI coding agent through converting an existing Snowflake Streamlit
+application into a Mendix application that can run on this platform.
+
 ## Screenshots
 
 The Streamlit admin UI manages apps from a browser, themed to Siemens iX:
