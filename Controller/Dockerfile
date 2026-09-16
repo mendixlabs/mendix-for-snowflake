@@ -1,5 +1,5 @@
 # Bases pinned to immutable digests for reproducible, scannable builds (NAAAPS).
-# Refresh: docker pull python:3.12-slim && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
+# Refresh: docker pull python:3.14-slim && docker inspect --format '{{index .RepoDigests 0}}' python:3.14-slim
 # Refresh: docker pull gcr.io/distroless/cc-debian13:nonroot && docker inspect --format '{{index .RepoDigests 0}}' gcr.io/distroless/cc-debian13:nonroot
 # Local-only debug variant: swap the final FROM to gcr.io/distroless/cc-debian13:debug-nonroot
 # (adds a BusyBox shell). Never push the debug variant.
@@ -35,15 +35,15 @@ RUN mkdir -p /opt/runtime-libs \
 
 # --- runtime ---------------------------------------------------------------
 # distroless/cc-debian13 = glibc + libssl + libstdc++, no shell, no package
-# manager. Same Debian 13 (trixie) userland as the python:3.12-slim builder
+# manager. Same Debian 13 (trixie) userland as the python:3.14-slim builder
 # (glibc 2.41), so native wheels (cryptography, pydantic-core, uvloop,
 # httptools) are ABI-compatible. cc-debian12 does NOT work here: its glibc
-# 2.36 predates the GLIBC_2.38 symbols libpython3.12.so needs.
+# 2.36 predates the GLIBC_2.38 symbols libpython3.14.so needs.
 # NOTE: no RUN is possible in this stage (no shell). Anything needing mkdir/
 # chown at build time goes in the builder stage above.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:aded2458d026e046cb68199db0e5793e1028ffa143f7258f3c4278253e20add7
 # /usr/local carries the interpreter, stdlib C extensions (lib-dynload),
-# libpython3.12.so, and all pip-installed packages in one consistent copy.
+# libpython3.14.so, and all pip-installed packages in one consistent copy.
 COPY --from=builder --chown=65532:65532 /usr/local /usr/local
 # Stdlib-required shared libs absent from distroless cc (see builder stage).
 COPY --from=builder /opt/runtime-libs/ /usr/lib/x86_64-linux-gnu/

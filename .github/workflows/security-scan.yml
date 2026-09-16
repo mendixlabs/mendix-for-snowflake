@@ -88,6 +88,18 @@ jobs:
         # Same platform flag as native-app/scripts/build-and-push.ps1;
         # --provenance only matters for the registry push, not a local scan.
         run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
+      - name: Check runtime imports
+        if: matrix.image != 'mendix-base'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          imports="import ssl, ctypes, bz2, lzma, sqlite3, uuid, dbm, readline; import snowflake.connector"
+          if [ "$IMAGE" = "mendix-deploy-controller" ]; then
+            imports="$imports; import fastapi, uvicorn, pydantic, yaml, psycopg"
+          else
+            imports="$imports; import streamlit, httpx"
+          fi
+          docker run --rm --entrypoint /usr/local/bin/python "$IMAGE:scan" -c "$imports"
       - name: Trivy scan (full report, SARIF)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
