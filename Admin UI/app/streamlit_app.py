@@ -49,4 +49,10 @@ pages = [
 ]
 
 pg = st.navigation(pages)
+with st.sidebar.container(key="privacy-notice"):
+    st.markdown(
+        '<a href="https://www.siemens.com/en-us/privacy-notice/" '
+        'target="_blank" rel="noopener noreferrer">Privacy Notice</a>',
+        unsafe_allow_html=True,
+    )
 pg.run()

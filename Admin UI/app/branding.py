@@ -6,8 +6,7 @@ pinned to `base=dark` because the app runs embedded behind SPCS and would
 otherwise default to light. Native theming colors Streamlit's own widgets
 correctly.
 
-This module adds only what the native theme cannot: the Titillium Web font
-(native `theme.font` takes no custom family) and the Siemens Deep Blue backdrop
+This module applies system fonts and adds the Siemens Deep Blue backdrop
 behind the white-only logo / header bar.
 """
 from __future__ import annotations
@@ -20,17 +19,15 @@ _LOGO_PATH = str((Path(__file__).parent / "assets" / "siemens-logo-white.svg").r
 
 _CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700&display=swap');
-
 :root {
   --siemens-deep-blue: #000028;  /* logo backdrop + header accent */
   --ix-primary: #00bde3;         /* iX Classic dark primary (focus ring) */
 }
 
-/* Titillium Web everywhere (native theme.font accepts no custom family). */
+/* Use fonts installed on the user's device. */
 html, body, [data-testid="stAppViewContainer"], .stApp,
 [data-testid="stSidebar"], button, input, textarea, select {
-  font-family: "Titillium Web", "Siemens Sans", system-ui, -apple-system, sans-serif;
+  font-family: system-ui, -apple-system, sans-serif;
 }
 
 /* Siemens Deep Blue header bar + logo backdrop. The logo SVG is white-only with
@@ -44,6 +41,29 @@ html, body, [data-testid="stAppViewContainer"], .stApp,
   border-radius: 4px;
   height: 2.6rem;
   box-sizing: content-box;
+}
+
+/* Keep the notice below sidebar content, with room to scroll on short screens. */
+[data-testid="stSidebarContent"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+[data-testid="stSidebarUserContent"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+[data-testid="stSidebarUserContent"] > [data-testid="stVerticalBlock"] {
+  flex: 1;
+}
+[data-testid="stSidebar"] .st-key-privacy-notice {
+  margin-top: auto;
+  padding-top: 1rem;
+  padding-bottom: 0.5rem;
+}
+[data-testid="stSidebar"] .st-key-privacy-notice a {
+  font-size: 0.85rem;
 }
 
 /* Keep focus rings visible for accessibility (do not strip outlines). */

@@ -1,46 +1,3 @@
-# =============================================================================
-# Private (targeted) listing manifest for the Mendix-on-SPCS Native App.
-#
-# Committable: the only environment-specific value (the consumer account
-# locators) is the <CONSUMER_ACCOUNTS> token, rendered by scripts/release.ps1
-# from native-app-config.json `consumerTargets` (format: ORG.ACCOUNT, comma
-# list -> YAML flow sequence). Everything else here (profile name, terms link,
-# doc URL) is non-secret and matches the published sibling listing.
-#
-# This is consumed by:
-#   CREATE EXTERNAL LISTING MENDIX_SPCS_LISTING
-#     APPLICATION PACKAGE MENDIX_SPCS_PKG
-#     AS '<rendered listing-manifest.yml>'
-#     PUBLISH = FALSE REVIEW = TRUE;
-# The application package is attached by the SQL clause, NOT here. The *version*
-# served to consumers comes from the package's release directive, NOT this file.
-#
-# GATED: only used once DISTRIBUTION=EXTERNAL and the NAAAPS review reach
-# APPROVED (plus the one-time container Product Security provider approval).
-# See HOW-TO-PUBLISH.md "Distribution Gate: External Listing".
-#
-# Marketing copy + structure mirror the live published sibling listing
-# "Mendix Data Loader" (global_name GZTDZHHIE0), read from this same provider
-# account via DESCRIBE LISTING. Contacts/logo/company blurb are NOT set here:
-# they live on the shared provider profile referenced below, identical to the
-# Data Loader. The profile carries the support email (SA_Dev_Team@mendix.com),
-# supportUrl, privacyUrl, and the Mendix logo.
-#
-# VERIFY-AT-RUN (confirm against the live CREATE EXTERNAL LISTING messages,
-# since the sibling is a public Marketplace listing and this one is private +
-# targeted):
-#   - profile: confirm a private targeted listing accepts/requires the shared
-#     provider profile (public Marketplace listings require it).
-#   - categories: "CONNECTORS" kept (no better-fitting value found); confirm
-#     CREATE accepts it for a container/runtime app.
-#   - usage_examples: omitted. The sibling's example is a SQL query; this app is
-#     UI-driven, not a SQL-queryable data product. Confirm none is required.
-#   - subtitle: kept; confirm whether it is mandatory for a private listing.
-#   - auto_fulfillment: omitted. The sibling sets refresh_type
-#     SUB_DATABASE_WITH_REFERENCE_USAGE; confirm whether a targeted, same-region
-#     listing needs it.
-# =============================================================================
-
 title: "Mendix on Snowpark Container Services"
 subtitle: "Run and operate Mendix applications natively in Snowflake"
 description: |
@@ -56,9 +13,8 @@ description: |
   ordinary grantable Snowflake privilege, and the app's readme documents a scoped installer
   role covering the full install.
 
-  This application is a standard part of the Mendix Platform and therefore our service-level
-  agreements (SLAs) apply here as well. For more information refer to the Mendix Support Guide
-  (https://docs.mendix.com/support/).
+  This is an experimental feature still in beta. For more information or feedback, see
+  https://github.com/mendixlabs/mendix-for-snowflake.
 
 categories:
 - "CONNECTORS"
@@ -66,9 +22,6 @@ categories:
 resources:
   documentation: "https://github.com/mendixlabs/mendix-for-snowflake"
 
-# Shared Mendix provider profile (global name GZTDZHHIDF). Inherits the company
-# name, description, logo, supportUrl, privacyUrl, and the support/technical
-# contact email (SA_Dev_Team@mendix.com). Do NOT re-enter contacts on the listing.
 profile: "MENDIX_6A176635_539A_4448_8BFA_A0252088E1D5"
 
 listing_terms:
@@ -91,22 +44,8 @@ data_attributes:
   - "Mendix application"
   - "Container Services"
 
-# PHASE A (now): private/targeted, locked to the accounts in consumerTargets.
-# Create with PUBLISH = FALSE REVIEW = TRUE. This passes NAAAPS (the security
-# gate is on the package version, not the listing).
-#
-# PHASE B (later, to go public): going private->public is NOT `ADD TARGETS`
-# (that only adds more accounts to a targeted listing). Replace the whole targets
-# section via a full-manifest alter on the existing listing:
-#     ALTER LISTING MENDIX_SPCS_LISTING AS $$
-#       ...full manifest with:
-#       targets:
-#         regions:
-#         - "ALL"
-#     $$ PUBLISH = TRUE REVIEW = TRUE;
-# This reuses the package's NAAAPS approval (no security re-scan); only a separate,
-# lighter Marketplace Ops content review applies. Use the V1 manifest schema (this
-# file); do not mix in the V2 external_targets/locations form. See the plan's
-# "Two-phase sequencing" section.
+auto_fulfillment:
+  refresh_type: "SUB_DATABASE_WITH_REFERENCE_USAGE"
+
 targets:
   accounts: <CONSUMER_ACCOUNTS>

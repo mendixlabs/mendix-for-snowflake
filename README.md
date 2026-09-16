@@ -37,7 +37,6 @@ A Snowflake Native App with Containers that runs Mendix apps on SPCS inside the 
 - **Admin UI** (`Admin UI/`) - Streamlit admin frontend running as a sibling app-owned service. Calls the controller over internal SPCS DNS and lets operators manage apps from a browser. Pages: app status and lifecycle (deploy, suspend, resume, delete) with live progress captions, failure reasons, deploy history with rollback, and per-app health; PAD upload, constants editor, per-app external access integrations, logs, activity audit log, a Setup page for Postgres, EAI, and egress-alert configuration, and a privileged Infrastructure page for compute pool resize and egress IP expiry. Apps flagged after a platform upgrade show an "Apply platform update" action, per-app or fleet-wide. Multi-tenant: each app carries an `owner_role` and operators see only apps owned by roles they hold.
 - **Mendix Base Image** (`Mendix Base Image/`) - A generic Mendix runner image. Built once and shared across all apps. No app code baked in — the app is loaded from the stage at container startup.
 - **SnowflakeSSO module** (`App Components/`) - Mendix module that reads the `Sf-Context-Current-User` header injected by SPCS, auto-logs users in using their Snowflake identity, and captures the caller token for querying Snowflake data as the end user.
-- **[native-app/HOW-TO-PUBLISH.md](native-app/HOW-TO-PUBLISH.md)** - Provider runbook: build, version, validate, release.
 - **[native-app/app/readme.md](native-app/app/readme.md)** - Consumer-facing install and setup guide.
 - **[mendix-spcs-howto.md](mendix-spcs-howto.md)** - Developer and automation reference: building a Mendix app for the platform (SnowflakeSSO, JDBC, constants), the controller REST API for CI/CD, troubleshooting, base image internals.
 - **[mendix-spcs-caveats-and-ideas.md](mendix-spcs-caveats-and-ideas.md)** - Known limitations and future work.
@@ -86,8 +85,7 @@ flowchart TB
   attach per app for other egress needs.
 - **Consumer Snowflake data access** uses Snowflake's two-layer restricted caller's-rights model:
   a query succeeds only when both the application object and the calling end user hold the grant.
-- See [native-app/HOW-TO-PUBLISH.md](native-app/HOW-TO-PUBLISH.md) for the release/install runbook
-  and [native-app/app/readme.md](native-app/app/readme.md) for the consumer-facing setup guide.
+- See [native-app/app/readme.md](native-app/app/readme.md) for the consumer-facing setup guide.
 
 ## Prerequisites
 
@@ -105,12 +103,6 @@ flowchart TB
 - Mendix Studio Pro 10.24.19+ or 11.6.5+ (Portable App Distribution export)
 
 ## Quick Start
-
-**Publish** (provider, full runbook in [native-app/HOW-TO-PUBLISH.md](native-app/HOW-TO-PUBLISH.md)):
-
-1. Build and push the three images: `.\native-app\scripts\build-and-push.ps1`
-2. Cut a version: `snow app version create v1` from the rendered `.build/` project
-3. Set the release directive (`scripts/release.ps1` automates the gate checks)
 
 **Install** (consumer, per [native-app/app/readme.md](native-app/app/readme.md)):
 
@@ -167,3 +159,12 @@ SPCS compute pools charge per hour of runtime. A CPU_X64_S pool costs 0.11 credi
 - Per-app external access is capped at four optional integration slots (`app_eai_1`-`app_eai_4`); Snowflake does not support multi-valued EAI references, so more egress targets need more slots in a future release
 
 See [mendix-spcs-caveats-and-ideas.md](mendix-spcs-caveats-and-ideas.md) for the full list.
+
+## License and OSS clearance
+
+Project source code is licensed under the [MIT License](LICENSE.txt),
+copyright (c) 2026 Siemens AG. Third-party components retain their own licenses.
+
+See [OPEN_SOURCE.md](OPEN_SOURCE.md) for the automated license and notice evidence.
+Mendix and Snowflake product terms and trademark rights remain separate from the
+project license.

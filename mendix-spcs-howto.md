@@ -4,7 +4,6 @@ This document covers what the install-path docs do not: how to **build a Mendix 
 platform (SnowflakeSSO, JDBC, constants) and how to **automate the controller** through its
 REST API. For everything else:
 
-- **Publishing the app** (provider): [native-app/HOW-TO-PUBLISH.md](native-app/HOW-TO-PUBLISH.md)
 - **Installing the app** (consumer): the listing page and [native-app/app/readme.md](native-app/app/readme.md)
 - **Post-install setup** (Postgres, EAI, secrets, grants): the admin UI's **Setup / Verify** page
   shows the exact SQL and verifies each step
