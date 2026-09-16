@@ -7,7 +7,6 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from auth import client, is_privileged_operator
 from controller_client import ControllerError
@@ -102,7 +101,7 @@ def _scroll_script(is_first_render: bool, logs: str) -> str:
     user was already pinned to the bottom — chat-client tail behavior.
     """
     first_js = "true" if is_first_render else "false"
-    # components.html renders through a React.memo'd <iframe srcDoc=...>: if this
+    # st.iframe renders through a React.memo'd <iframe srcDoc=...>: if this
     # function returns byte-identical HTML on every tick (it does, once
     # is_first_render settles to False), React never touches the DOM and the
     # <script> below never runs again, so auto-refresh ticks stop being noticed.
@@ -111,10 +110,16 @@ def _scroll_script(is_first_render: bool, logs: str) -> str:
     nonce = hash(logs) & 0xFFFFFFFF
     return f"""
     <!-- logs:{nonce} -->
+    <style>body{{margin:0;overflow:hidden}}</style>
     <script>
       const doc = window.parent.document;
       const snap = () => {{
-        const wraps = doc.querySelectorAll('[data-testid="stVerticalBlockBorderWrapper"]');
+        // "stVerticalBlockBorderWrapper" was this app's original testid for a
+        // bordered container; a later Streamlit version renamed it to the more
+        // generic "stVerticalBlock" (used for every vertical block, not just
+        // bordered ones - the loop below still needs to pick out the one that's
+        // actually overflowing, since most matches on a page won't be).
+        const wraps = doc.querySelectorAll('[data-testid="stVerticalBlock"]');
         if (!wraps.length) return;
         // The fixed-height container scrolls on the wrapper or an inner element;
         // find the last actually-scrollable node so scrollTop lands.
@@ -131,6 +136,17 @@ def _scroll_script(is_first_render: bool, logs: str) -> str:
       }};
       // Defer past layout + syntax highlighting so scrollHeight is final.
       requestAnimationFrame(() => requestAnimationFrame(snap));
+      // The first render competes with the rest of the page's own initial mount
+      // (branding script, sidebar, other widgets) for layout time, so a large log
+      // block's syntax highlighting may not have finished settling after just two
+      // animation frames - unlike a later, isolated auto-refresh tick, which has
+      // nothing else competing with it. Re-snap over a short window so a
+      // late-settling layout still gets caught instead of leaving the view stuck
+      // partway (snap() re-measures scrollHeight fresh each call, so repeating it
+      // is harmless once things have already settled).
+      if ({first_js}) {{
+        [100, 300, 600].forEach((ms) => setTimeout(snap, ms));
+      }}
     </script>
     """
 
@@ -178,7 +194,7 @@ def _log_view() -> None:
 
     is_first_render = _SCROLL_INIT_KEY not in st.session_state
     st.session_state[_SCROLL_INIT_KEY] = True
-    components.html(_scroll_script(is_first_render, logs), height=0)
+    st.iframe(_scroll_script(is_first_render, logs), height=1)
 
 
 _log_view()

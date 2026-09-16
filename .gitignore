@@ -9,3 +9,9 @@ service_spec.yaml
 __pycache__/
 # Support case contains account identifiers - keep out of git (any extension)
 SUPPORT-CASE-native-app-executeascaller.*
+
+# Local working docs (never committed)
+RUNBOOK-dry-run.md
+CHANGELOG-validation.md
+PLAN-*.md
+.coverage
