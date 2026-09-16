@@ -105,7 +105,7 @@ def record(app_name: str, operation: str, record: AppRecord, status: str,
 
 def _prune(app_name: str) -> None:
     """Keep only the newest _KEEP_PER_APP rows for this app."""
-    # nosec B608 - _TABLE is a fixed constant and _KEEP_PER_APP an int literal;
+    # _TABLE comes from deployment configuration and _KEEP_PER_APP is an int literal;
     # app_name is parameterized (bound twice, once per subquery reference).
     sf.execute_sql(
         f"""
@@ -117,7 +117,7 @@ def _prune(app_name: str) -> None:
             ORDER BY ts DESC, id DESC
             LIMIT {_KEEP_PER_APP}
           )
-        """,
+        """,  # nosec B608
         (app_name, app_name),
     )
 
