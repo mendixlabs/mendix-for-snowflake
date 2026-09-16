@@ -2,7 +2,7 @@
 # JRE, not JDK: the Mendix Runtime only needs a JRE to run a deployed app (JDK is a
 # Studio Pro development-time concern) - JRE drops the compiler/jshell/jarsigner etc.
 # Refresh: docker pull eclipse-temurin:21-jre && docker inspect --format '{{index .RepoDigests 0}}' eclipse-temurin:21-jre
-FROM eclipse-temurin:24-jre@sha256:8cb2387a28af84cf0db0948d9c67d4480192f4e567027a3963f145d218e8b4f2
+FROM eclipse-temurin:21-jre@sha256:6cbdfc89c9657478bc5abea638030310f6c0267404e98a5808097bb1925932f1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client unzip && rm -rf /var/lib/apt/lists/* \
     # temurin bundles Canonical's pebble service manager (not dpkg-owned); this
