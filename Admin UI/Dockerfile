@@ -1,11 +1,11 @@
 # Bases pinned to immutable digests for reproducible, scannable builds (NAAAPS).
-# Refresh: docker pull python:3.12-slim && docker inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
+# Refresh: docker pull python:3.14-slim && docker inspect --format '{{index .RepoDigests 0}}' python:3.14-slim
 # Refresh: docker pull gcr.io/distroless/cc-debian13:nonroot && docker inspect --format '{{index .RepoDigests 0}}' gcr.io/distroless/cc-debian13:nonroot
 # Local-only debug variant: swap the final FROM to gcr.io/distroless/cc-debian13:debug-nonroot
 # (adds a BusyBox shell). Never push the debug variant.
 
 # --- builder ---------------------------------------------------------------
-FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
@@ -36,15 +36,15 @@ RUN mkdir -p /opt/runtime-libs \
 
 # --- runtime ---------------------------------------------------------------
 # distroless/cc-debian13 = glibc + libssl + libstdc++, no shell, no package
-# manager. Same Debian 13 (trixie) userland as the python:3.12-slim builder
+# manager. Same Debian 13 (trixie) userland as the python:3.14-slim builder
 # (glibc 2.41), so native wheels (cryptography, pydantic-core, pyarrow) are
 # ABI-compatible. cc-debian12 does NOT work here: its glibc 2.36 predates the
-# GLIBC_2.38 symbols libpython3.12.so needs.
+# GLIBC_2.38 symbols libpython3.14.so needs.
 # NOTE: no RUN is possible in this stage (no shell). Anything needing mkdir/
 # chown at build time goes in the builder stage above.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
 # /usr/local carries the interpreter, stdlib C extensions (lib-dynload),
-# libpython3.12.so, and all pip-installed packages in one consistent copy.
+# libpython3.14.so, and all pip-installed packages in one consistent copy.
 COPY --from=builder --chown=65532:65532 /usr/local /usr/local
 # Stdlib-required shared libs absent from distroless cc (see builder stage).
 COPY --from=builder /opt/runtime-libs/ /usr/lib/x86_64-linux-gnu/
