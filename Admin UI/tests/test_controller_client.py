@@ -276,6 +276,48 @@ class TestEndpointSmokeTests:
         assert req.method == "POST"
         assert req.url.path == "/apps/myapp/trigger-deploy"
 
+    def test_list_history(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"history": [{"operation": "deploy"}]}))
+        client = mock_controller(handler)
+        result = client.list_history("myapp")
+        assert handler.requests[0].method == "GET"
+        assert handler.requests[0].url.path == "/apps/myapp/history"
+        assert result == [{"operation": "deploy"}]
+
+    def test_list_history_missing_field_defaults_empty(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({}))
+        client = mock_controller(handler)
+        assert client.list_history("myapp") == []
+
+    def test_rollback(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        result = client.rollback("myapp")
+        req = handler.requests[0]
+        assert req.method == "POST"
+        assert req.url.path == "/apps/myapp/rollback"
+        assert req.content == b""
+        assert result == {"status": "DEPLOYING"}
+
+    def test_rollback_with_entry_id(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        client.rollback("myapp", entry_id=7)
+        req = handler.requests[0]
+        import json
+        assert req.url.path == "/apps/myapp/rollback"
+        assert json.loads(req.content) == {"entry_id": 7}
+
+    def test_get_health(self, mock_controller, recording_handler):
+        body = {"service_status": "RUNNING", "containers": [{"container_name": "mendix-app", "status": "READY",
+                                                              "message": None}], "ready": True}
+        handler = recording_handler(_ok(body))
+        client = mock_controller(handler)
+        result = client.get_health("myapp")
+        assert handler.requests[0].method == "GET"
+        assert handler.requests[0].url.path == "/apps/myapp/health"
+        assert result == body
+
     def test_update_constants_body_shape(self, mock_controller, recording_handler):
         handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
         client = mock_controller(handler)
@@ -292,6 +334,14 @@ class TestEndpointSmokeTests:
         req = handler.requests[0]
         assert req.method == "PUT"
         assert req.url.path == "/apps/myapp/spec"
+
+    def test_apply_platform_update(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        client.apply_platform_update("myapp")
+        req = handler.requests[0]
+        assert req.method == "POST"
+        assert req.url.path == "/apps/myapp/platform-update"
 
     def test_update_license(self, mock_controller, recording_handler):
         handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
@@ -373,6 +423,29 @@ class TestEndpointSmokeTests:
         assert handler.requests[0].url.path == "/system/pg-info"
         assert result == {"host": "pg.internal", "port": "5432"}
 
+    def test_get_external_access_slots(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"slots": [{"key": "app_eai_1", "bound": True}]}))
+        client = mock_controller(handler)
+        result = client.get_external_access_slots()
+        assert handler.requests[0].method == "GET"
+        assert handler.requests[0].url.path == "/system/external-access"
+        assert result == [{"key": "app_eai_1", "bound": True}]
+
+    def test_get_external_access_slots_missing_field_defaults_empty(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({}))
+        client = mock_controller(handler)
+        assert client.get_external_access_slots() == []
+
+    def test_update_external_access(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"status": "DEPLOYING"}, status=202))
+        client = mock_controller(handler)
+        client.update_external_access("myapp", ["app_eai_1"])
+        import json
+        req = handler.requests[0]
+        assert req.method == "PUT"
+        assert req.url.path == "/apps/myapp/external-access"
+        assert json.loads(req.content) == {"slots": ["app_eai_1"]}
+
     def test_update_compute_pool_omits_none_fields(self, mock_controller, recording_handler):
         handler = recording_handler(_ok({"name": "TEST_POOL"}))
         client = mock_controller(handler)
@@ -381,3 +454,43 @@ class TestEndpointSmokeTests:
         req = handler.requests[0]
         assert req.method == "PATCH"
         assert json.loads(req.content) == {"min_nodes": 2}
+
+    def test_get_egress_status(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({
+            "min_expiry": "2026-09-07T00:00:00+00:00", "days_remaining": 13, "ranges": [],
+            "acknowledged_through": None, "alert_integration": None, "alert_recipients": [],
+        }))
+        client = mock_controller(handler)
+        result = client.get_egress_status()
+        assert handler.requests[0].method == "GET"
+        assert handler.requests[0].url.path == "/system/egress-status"
+        assert result["days_remaining"] == 13
+
+    def test_ack_egress(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"acknowledged_through": "2026-09-10"}))
+        client = mock_controller(handler)
+        result = client.ack_egress("2026-09-10")
+        import json
+        req = handler.requests[0]
+        assert req.method == "POST"
+        assert req.url.path == "/system/egress-ack"
+        assert json.loads(req.content) == {"through_date": "2026-09-10"}
+        assert result == {"acknowledged_through": "2026-09-10"}
+
+    def test_set_egress_alert_config(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"alert_integration": "MY_INT", "alert_recipients": ["a@example.com"]}))
+        client = mock_controller(handler)
+        client.set_egress_alert_config("MY_INT", ["a@example.com"])
+        import json
+        req = handler.requests[0]
+        assert req.method == "POST"
+        assert req.url.path == "/system/egress-alert-config"
+        assert json.loads(req.content) == {"integration_name": "MY_INT", "recipients": ["a@example.com"]}
+
+    def test_get_egress_warning(self, mock_controller, recording_handler):
+        handler = recording_handler(_ok({"warn": True, "days_remaining": 13}))
+        client = mock_controller(handler)
+        result = client.get_egress_warning()
+        assert handler.requests[0].method == "GET"
+        assert handler.requests[0].url.path == "/system/egress-warning"
+        assert result == {"warn": True, "days_remaining": 13}

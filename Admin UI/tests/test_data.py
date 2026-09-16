@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import data as data_module
+from controller_client import ControllerError
 from data import pad_filename
 
 
@@ -21,3 +23,30 @@ class TestPadFilename:
 
     def test_empty_string_returns_empty_string(self):
         assert pad_filename("") == ""
+
+
+class TestEgressWarning:
+    """Covers data.egress_warning's own logic (the client call + ControllerError
+    fallback) - the caching decorator itself is exercised incidentally, not the
+    point of these tests, so each test uses its own operator/roles key to avoid
+    collisions with whatever another test happened to cache."""
+
+    def test_returns_client_result(self, monkeypatch):
+        class FakeClient:
+            def get_egress_warning(self):
+                return {"warn": True, "days_remaining": 5}
+
+        monkeypatch.setattr(data_module, "client", lambda: FakeClient())
+        monkeypatch.setattr(data_module, "current_operator", lambda: "egress-test-1")
+        monkeypatch.setattr(data_module, "operator_roles", lambda: ("ROLE_A",))
+        assert data_module.egress_warning() == {"warn": True, "days_remaining": 5}
+
+    def test_controller_error_degrades_to_no_warning(self, monkeypatch):
+        class FakeClient:
+            def get_egress_warning(self):
+                raise ControllerError(503, "controller down")
+
+        monkeypatch.setattr(data_module, "client", lambda: FakeClient())
+        monkeypatch.setattr(data_module, "current_operator", lambda: "egress-test-2")
+        monkeypatch.setattr(data_module, "operator_roles", lambda: ("ROLE_A",))
+        assert data_module.egress_warning() == {"warn": False, "days_remaining": None}

@@ -33,6 +33,11 @@ st.caption(
 
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
+try:
+    _eai_slots = client().get_external_access_slots()
+except ControllerError:
+    _eai_slots = []
+
 with st.form("register"):
     name = st.text_input(
         "App name",
@@ -97,6 +102,24 @@ with st.form("register"):
         type="password",
         help="Required if a license ID is given above.",
     )
+
+    st.caption(
+        "External access (optional): attach this app's service to any egress "
+        "integrations already bound at the account level. Unbound slots are "
+        "disabled - bind them first on the Setup page."
+    )
+    selected_eai_slots: list[str] = []
+    for slot in _eai_slots:
+        checked = st.checkbox(
+            slot.get("label") or slot["key"],
+            value=False,
+            disabled=not slot.get("bound"),
+            help=None if slot.get("bound") else "Not bound yet - see the Setup page.",
+            key=f"register-eai-{slot['key']}",
+        )
+        if checked:
+            selected_eai_slots.append(slot["key"])
+
     submitted = st.form_submit_button("Register", type="primary")
 
 if submitted:
@@ -131,6 +154,7 @@ if submitted:
             "use_caller_rights": use_caller_rights,
             "constants": constants,
             "owner_role": owner_role,
+            "external_access": selected_eai_slots,
         }
         if license_id and license_key:
             payload["license_id"] = license_id

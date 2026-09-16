@@ -26,6 +26,9 @@ def _row_to_record(row: dict) -> AppRecord:
     role_mapping = row.get("ROLE_MAPPING") or {}
     if isinstance(role_mapping, str):
         role_mapping = json.loads(role_mapping)
+    external_access = row.get("EXTERNAL_ACCESS") or []
+    if isinstance(external_access, str):
+        external_access = json.loads(external_access)
     return AppRecord(
         name=row["NAME"],
         service_name=row["SERVICE_NAME"],
@@ -43,6 +46,11 @@ def _row_to_record(row: dict) -> AppRecord:
         created_at=str(row["CREATED_AT"]) if row.get("CREATED_AT") else None,
         last_deployed_at=str(row["LAST_DEPLOYED_AT"]) if row.get("LAST_DEPLOYED_AT") else None,
         owner_role=row.get("OWNER_ROLE") or "MENDIX_ADMIN_OPERATOR_ROLE",
+        status_detail=row.get("STATUS_DETAIL"),
+        failed_operation=row.get("FAILED_OPERATION"),
+        external_access=external_access,
+        platform_image=row.get("PLATFORM_IMAGE"),
+        platform_update_available=bool(row.get("PLATFORM_UPDATE_AVAILABLE")),
     )
 
 
@@ -52,8 +60,9 @@ def create_app(record: AppRecord) -> None:
         f"""
         INSERT INTO {_TABLE}
             (name, service_name, app_schema, pg_database, resource_tier, use_caller_rights,
-             constants, pad_stage_path, endpoint_url, last_deploy_status, owner_role, license_id)
-        SELECT %s, %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s, %s, %s
+             constants, pad_stage_path, endpoint_url, last_deploy_status, owner_role, license_id,
+             platform_image, external_access)
+        SELECT %s, %s, %s, %s, %s, %s, PARSE_JSON(%s), %s, %s, %s, %s, %s, %s, PARSE_JSON(%s)
         """,
         (
             record.name,
@@ -68,6 +77,8 @@ def create_app(record: AppRecord) -> None:
             record.last_deploy_status,
             record.owner_role,
             record.license_id,
+            record.platform_image,
+            json.dumps(record.external_access or []),
         ),
     )
 
@@ -92,6 +103,8 @@ _ALLOWED_UPDATE_COLUMNS = frozenset({
     "last_deploy_status", "last_deployed_at",
     "resource_tier", "use_caller_rights", "owner_role", "license_id",
     "user_roles", "role_mapping",
+    "status_detail", "failed_operation", "external_access",
+    "platform_image", "platform_update_available",
 })
 
 
@@ -107,7 +120,7 @@ def update_app(name: str, fields: dict[str, Any]) -> None:
         if key == "constants":
             set_clauses.append(f"{key} = PARSE_JSON(%s)")
             values.append(json.dumps(_mask_constants(val)))
-        elif key in ("user_roles", "role_mapping"):
+        elif key in ("user_roles", "role_mapping", "external_access"):
             if val is None:
                 set_clauses.append(f"{key} = %s")
                 values.append(None)          # DELETE clears to SQL NULL

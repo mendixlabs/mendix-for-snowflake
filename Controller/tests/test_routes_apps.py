@@ -50,7 +50,7 @@ class TestCreateAppHappyPath:
         assert len(create_service_calls) == 1
         args, kw = create_service_calls[0]
         assert args[0] == "MYAPP_SERVICE"
-        assert args[2:] == ("TEST_POOL", "TEST_EAI", "TEST_WH")
+        assert args[2:] == ("TEST_POOL", ["TEST_EAI"], "TEST_WH")
 
         # The spec's DB username matches the same per-app role that was provisioned.
         spec = yaml.safe_load(args[1])
@@ -262,6 +262,45 @@ class TestDeleteApp:
         resp = client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
         assert resp.status_code == 204
         assert fake_registry.get_app("myapp") is None
+
+    def test_purges_deploy_history(self, client, fake_sf, fake_registry, fake_deploy_history, make_record,
+                                   role_headers):
+        # A name freed up by delete must not carry a stranger's history forward
+        # if it's re-registered later.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE")
+        fake_registry.add(record)
+        fake_deploy_history.rows.append({
+            "id": 1, "app_name": "myapp", "operation": "deploy", "status": "READY", "detail": None,
+            "pad_stage_path": "apps/myapp/current.zip", "resource_tier": "medium",
+            "use_caller_rights": False, "constant_names": [], "license_id": None,
+            "role_mapping": {}, "external_access": [],
+        })
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+        resp = client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 204
+        assert fake_deploy_history.list_for_app("myapp") == []
+
+    def test_history_purge_failure_does_not_block_delete(self, client, fake_sf, fake_registry, fake_deploy_history,
+                                                          make_record, role_headers, monkeypatch):
+        # Best-effort like every other teardown step: a purge failure is
+        # recorded in `failures` (surfaced as the usual 502) but never left the
+        # app un-deletable once the underlying issue is fixed - here we assert
+        # it behaves exactly like an existing best-effort step failing.
+        record = make_record(name="myapp", owner_role="OWNER_ROLE")
+        fake_registry.add(record)
+        fake_sf.service_statuses[record.service_name] = "SUSPENDED"
+
+        def raiser(name):
+            raise RuntimeError("history db unreachable")
+
+        monkeypatch.setattr(main.deploy_history, "delete_for_app", raiser)
+        resp = client.delete("/apps/myapp", headers=role_headers("OWNER_ROLE"))
+        assert resp.status_code == 502
+        assert "delete deploy history" in resp.json()["detail"]
+        # The other teardown steps still ran despite this one failing.
+        assert fake_sf.calls_for("drop_service")
+        assert fake_sf.calls_for("drop_schema_cascade")
+        assert fake_registry.get_app("myapp") is not None
 
 
 class TestCreateAppRollback:

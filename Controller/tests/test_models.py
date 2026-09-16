@@ -4,12 +4,16 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import (
+    EAI_SLOT_KEYS,
     RESOURCE_TIERS,
     AppRecord,
     CreateAppRequest,
+    EgressAckRequest,
+    EgressAlertConfigRequest,
     ResourceTier,
     UpdateComputePoolRequest,
     UpdateConstantsRequest,
+    UpdateExternalAccessRequest,
     UpdateLicenseRequest,
     UpdateRoleMappingRequest,
 )
@@ -113,6 +117,46 @@ def test_resource_tiers_has_exactly_three_keys():
     assert len(RESOURCE_TIERS) == 3
 
 
+class TestEgressAckRequest:
+    def test_valid_iso_date_parsed(self):
+        req = EgressAckRequest(through_date="2026-09-10")
+        assert req.through_date.isoformat() == "2026-09-10"
+
+    def test_non_iso_date_rejected(self):
+        with pytest.raises(ValidationError):
+            EgressAckRequest(through_date="09/10/2026")
+
+    def test_missing_field_rejected(self):
+        with pytest.raises(ValidationError):
+            EgressAckRequest()
+
+
+class TestEgressAlertConfigRequest:
+    def test_defaults_are_empty(self):
+        req = EgressAlertConfigRequest()
+        assert req.integration_name == ""
+        assert req.recipients == []
+
+    def test_valid_recipients_kept(self):
+        req = EgressAlertConfigRequest(integration_name="MY_INT", recipients=["a@example.com", "b@example.com"])
+        assert req.recipients == ["a@example.com", "b@example.com"]
+
+    def test_blank_recipient_dropped(self):
+        req = EgressAlertConfigRequest(recipients=["a@example.com", "  ", ""])
+        assert req.recipients == ["a@example.com"]
+
+    def test_recipient_without_at_rejected(self):
+        with pytest.raises(ValidationError):
+            EgressAlertConfigRequest(recipients=["not-an-email"])
+
+    def test_recipient_with_embedded_control_char_rejected(self):
+        # strip() only trims leading/trailing whitespace, so an embedded
+        # control character (not a trailing one) is the case that actually
+        # exercises the control-char check rather than being stripped away.
+        with pytest.raises(ValidationError):
+            EgressAlertConfigRequest(recipients=["a@ex\x00ample.com"])
+
+
 class TestCreateAppRequestLicense:
     def test_both_fields_accepted(self):
         req = _make(license_id="LIC-1", license_key="key-value")
@@ -179,6 +223,75 @@ class TestAppRecordRoleMappingDefaults:
         record = _make_record(user_roles=["User", "Administrator"], role_mapping={"ROLE_A": "Administrator"})
         assert record.user_roles == ["User", "Administrator"]
         assert record.role_mapping == {"ROLE_A": "Administrator"}
+
+
+class TestAppRecordWS0Fields:
+    def test_defaults(self):
+        record = _make_record()
+        assert record.status_detail is None
+        assert record.failed_operation is None
+        assert record.external_access == []
+        assert record.platform_image is None
+        assert record.platform_update_available is False
+
+    def test_explicit_values_round_trip(self):
+        record = _make_record(
+            status_detail="Timed out waiting for RUNNING after 120s",
+            failed_operation="deploy",
+            external_access=["app_eai_1", "app_eai_2"],
+            platform_image="mendix-base:1.2.3",
+            platform_update_available=True,
+        )
+        assert record.status_detail == "Timed out waiting for RUNNING after 120s"
+        assert record.failed_operation == "deploy"
+        assert record.external_access == ["app_eai_1", "app_eai_2"]
+        assert record.platform_image == "mendix-base:1.2.3"
+        assert record.platform_update_available is True
+
+    def test_serialized_record_includes_new_fields(self):
+        record = _make_record(external_access=["app_eai_1"])
+        dumped = record.model_dump()
+        assert dumped["external_access"] == ["app_eai_1"]
+        assert dumped["status_detail"] is None
+        assert dumped["platform_update_available"] is False
+
+
+class TestCreateAppRequestExternalAccess:
+    def test_default_empty(self):
+        req = _make()
+        assert req.external_access == []
+
+    def test_known_slots_accepted(self):
+        req = _make(external_access=["app_eai_1", "app_eai_4"])
+        assert req.external_access == ["app_eai_1", "app_eai_4"]
+
+    def test_unknown_slot_rejected(self):
+        with pytest.raises(ValidationError):
+            _make(external_access=["app_eai_5"])
+
+    def test_arbitrary_string_rejected(self):
+        with pytest.raises(ValidationError):
+            _make(external_access=["pg_eai"])
+
+
+class TestUpdateExternalAccessRequest:
+    def test_known_slots_accepted(self):
+        req = UpdateExternalAccessRequest(slots=["app_eai_2"])
+        assert req.slots == ["app_eai_2"]
+
+    def test_empty_list_accepted(self):
+        # Detaches every slot - not the same "must not be empty" rule as
+        # UpdateRoleMappingRequest (which reserves empty for DELETE instead).
+        req = UpdateExternalAccessRequest(slots=[])
+        assert req.slots == []
+
+    def test_unknown_slot_rejected(self):
+        with pytest.raises(ValidationError):
+            UpdateExternalAccessRequest(slots=["not_a_real_slot"])
+
+
+def test_eai_slot_keys_has_exactly_four_entries():
+    assert list(EAI_SLOT_KEYS) == ["app_eai_1", "app_eai_2", "app_eai_3", "app_eai_4"]
 
 
 class TestUpdateRoleMappingRequest:

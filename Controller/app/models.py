@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from enum import Enum
 from typing import Optional
 
@@ -12,11 +13,31 @@ _CONSTANT_NAME_RE = re.compile(CONSTANT_NAME_PATTERN)
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _ROLE_MAPPING_MAX_ENTRIES = 50
 
+# The four per-app EAI reference slots declared in manifest.yml (app_eai_1..4).
+# Fixed and small, so a plain tuple/frozenset - not derived from env - is the
+# structural "is this a legal slot key" check; whether a given slot is actually
+# bound is separate, runtime state (main.BOUND_EAI_SLOTS).
+EAI_SLOT_KEYS: tuple[str, ...] = ("app_eai_1", "app_eai_2", "app_eai_3", "app_eai_4")
+_EAI_SLOT_SET = frozenset(EAI_SLOT_KEYS)
+
 # Sentinel returned in place of constant values everywhere they leave the
 # controller (registry rows, API responses). Submitting it back means "keep the
 # existing secret"; the literal string is therefore reserved and can never be
 # stored as a real constant value.
 HIDDEN_VALUE = "<HIDDEN>"
+
+
+def _validate_eai_slots(slots: list[str]) -> list[str]:
+    # Structural check only (is this one of the four declared slot keys?) - a
+    # requested slot that IS a legal key but isn't currently bound is rejected
+    # separately at the endpoint level (main.py), which is the only place that
+    # knows the runtime bind state.
+    unknown = sorted(set(slots) - _EAI_SLOT_SET)
+    if unknown:
+        raise ValueError(
+            f"unknown external_access slot(s) {unknown}; must be a subset of {list(EAI_SLOT_KEYS)}"
+        )
+    return slots
 
 
 def _validate_constant_names(constants: dict[str, str]) -> dict[str, str]:
@@ -68,8 +89,15 @@ class CreateAppRequest(BaseModel):
     # no key, is a half-configured license.
     license_id: Optional[str] = None
     license_key: Optional[str] = None
+    # Which of the four declared app_eai_N slots this app's service should attach
+    # to. Structurally validated here (must be a known slot key); whether each
+    # requested slot is actually bound is checked at request time in main.py
+    # (422 if not) - a new app is never silently created with fewer integrations
+    # than requested.
+    external_access: list[str] = Field(default_factory=list)
 
     _check_constants = field_validator("constants")(_validate_constant_names)
+    _check_external_access = field_validator("external_access")(_validate_eai_slots)
 
     @model_validator(mode="after")
     def _check_license_pair(self) -> "CreateAppRequest":
@@ -87,6 +115,21 @@ class UpdateConstantsRequest(BaseModel):
 class UpdateSpecRequest(BaseModel):
     resource_tier: Optional[ResourceTier] = None
     use_caller_rights: Optional[bool] = None
+
+
+class UpdateExternalAccessRequest(BaseModel):
+    """Body for PUT /apps/{name}/external-access. The full desired slot set,
+    not a delta (same replace-the-whole-value semantics as UpdateRoleMappingRequest) -
+    an empty list detaches every currently-attached slot."""
+    slots: list[str]
+
+    _check_slots = field_validator("slots")(_validate_eai_slots)
+
+
+class RollbackRequest(BaseModel):
+    """Optional body for POST /apps/{name}/rollback. Omitted (or entry_id=None)
+    means the default path: roll back to the last successful deploy."""
+    entry_id: Optional[int] = None
 
 
 class UpdateLicenseRequest(BaseModel):
@@ -151,6 +194,13 @@ class AppRecord(BaseModel):
     license_id: Optional[str] = None
     user_roles: list[str] = Field(default_factory=list)       # detected from PAD at deploy
     role_mapping: dict[str, str] = Field(default_factory=dict)  # operator-set; not a secret, never masked
+    # WS0 schema groundwork (consumed by later workstreams): failure detail, bound
+    # per-app EAI slot keys, and platform (base image) staleness tracking.
+    status_detail: Optional[str] = None
+    failed_operation: Optional[str] = None
+    external_access: list[str] = Field(default_factory=list)  # bound app_eai_N slot keys attached to this app
+    platform_image: Optional[str] = None       # MENDIX_BASE_IMAGE at last respec
+    platform_update_available: bool = False
     pad_stage_path: Optional[str]
     endpoint_url: Optional[str]
     last_deploy_status: Optional[str]
@@ -175,3 +225,33 @@ class UpdateComputePoolRequest(BaseModel):
     min_nodes: Optional[int] = Field(None, ge=1, le=10)
     max_nodes: Optional[int] = Field(None, ge=1, le=10)
     auto_suspend_secs: Optional[int] = Field(None, ge=0)
+
+
+class EgressAckRequest(BaseModel):
+    """Body for POST /system/egress-ack. Pydantic's `date` type already
+    enforces ISO 8601 (YYYY-MM-DD), rejecting anything else with a 422."""
+    through_date: date
+
+
+class EgressAlertConfigRequest(BaseModel):
+    """Body for POST /system/egress-alert-config. Both fields may be empty to
+    clear the alert configuration; an integration with no recipients (or vice
+    versa) is stored as-is but never sends (egress_watch skips silently when
+    either half is unconfigured)."""
+    integration_name: str = ""
+    recipients: list[str] = Field(default_factory=list)
+
+    @field_validator("recipients")
+    @classmethod
+    def _check_recipients(cls, recipients: list[str]) -> list[str]:
+        cleaned = []
+        for raw in recipients:
+            r = raw.strip()
+            if not r:
+                continue
+            if _CONTROL_CHAR_RE.search(r):
+                raise ValueError(f"recipient {r!r} must not contain control characters")
+            if "@" not in r:
+                raise ValueError(f"recipient {r!r} does not look like an email address")
+            cleaned.append(r)
+        return cleaned

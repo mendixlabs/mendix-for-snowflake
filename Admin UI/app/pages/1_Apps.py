@@ -13,12 +13,22 @@ import streamlit as st
 
 from auth import client, operator_roles, operator_roles_error
 from controller_client import ControllerError
-from data import apps_status_unavailable, list_apps, pad_filename
+from data import apps_status_unavailable, egress_warning, list_apps, pad_filename
 
 # apply_branding() runs once in streamlit_app.py, before st.navigation()/pg.run(),
 # so it (and the persistent sidebar it builds) applies to every page already.
 st.set_page_config(page_title="Apps", layout="wide")
 st.title("Apps")
+
+# Cheap, unprivileged, cached (data.egress_warning) signal - never fetches the
+# raw ranges or alert config, and safe for every operator regardless of role.
+_egress = egress_warning()
+if _egress.get("warn"):
+    st.warning(
+        f"The SPCS egress IP whitelist expires in {_egress.get('days_remaining')} day(s). "
+        "See the Infrastructure page's 'Egress IP expiry' section for the fix-up SQL.",
+        icon="⚠️",
+    )
 
 _TRANSIENT = {"DEPLOYING", "SUSPENDING", "RESUMING"}
 
@@ -48,6 +58,33 @@ def _status_badge(status: str | None) -> str:
         return status or ""
     icon = _STATUS_ICON.get(status.upper())
     return f"{icon} {status}" if icon else status
+
+
+def _platform_badge(update_available: bool) -> str:
+    return "🆙 Update available" if update_available else ""
+
+
+def _health_badge(health: dict | None) -> str:
+    """Compact health line from a GET .../health response - same icon vocabulary
+    as _STATUS_ICON. `health` is None when it hasn't been fetched (fleet table)
+    or the fetch failed; both render as "" rather than a misleading icon.
+
+    A container's own status reaches READY only once its readinessProbe passes,
+    so "RUNNING but not ready" (containers up, Mendix not yet serving) is
+    distinguished from a genuine container error - anything reporting neither
+    READY nor RUNNING/PENDING is treated as the latter.
+    """
+    if not health:
+        return ""
+    if health.get("ready"):
+        return "🟢 Healthy"
+    containers = health.get("containers") or []
+    errored = [c for c in containers if (c.get("status") or "").upper() not in ("READY", "RUNNING", "PENDING")]
+    if errored:
+        return "🔴 Container error"
+    if (health.get("service_status") or "").upper() == "RUNNING":
+        return "🟡 Starting"
+    return ""
 
 
 def _refresh_now() -> None:
@@ -97,25 +134,63 @@ def _run_bulk(names: list[str], action: str, fn) -> None:
     st.session_state["bulk-last-result"] = {"action": action, "results": results}
 
 
-cols = st.columns([1, 1, 4])
+cols = st.columns([1, 1, 1, 3])
 with cols[0]:
     if st.button("Refresh"):
         _refresh_now()
         st.rerun()
 with cols[1]:
-    auto = st.toggle("Auto-refresh", value=False, help="Refresh every 10 seconds.")
+    auto = st.toggle(
+        "Auto-refresh", value=False,
+        help="Refresh every 10 seconds. Also refreshes automatically (regardless of "
+             "this toggle) while any app has a deploy/suspend/resume operation in flight.",
+    )
+with cols[2]:
+    if st.button("Fleet health", help="Fetch container-level health for every listed app once. "
+                                       "Not polled automatically - click again to refresh."):
+        try:
+            apps_now = list_apps()
+        except ControllerError as e:
+            st.error(f"Failed to load apps: {e}")
+            apps_now = []
+        if apps_now:
+            progress = st.progress(0.0, text=f"Fleet health 0/{len(apps_now)}")
+            health_map: dict[str, dict | None] = {}
+            for i, a in enumerate(apps_now):
+                try:
+                    health_map[a["name"]] = client().get_health(a["name"])
+                except ControllerError:
+                    health_map[a["name"]] = None
+                progress.progress((i + 1) / len(apps_now), text=f"Fleet health {i+1}/{len(apps_now)}")
+            st.session_state["fleet-health"] = health_map
+        st.rerun()
 st.caption("Status is fetched on page load and after each action. Click Refresh to re-poll.")
 
+# Read at decoration time: this drives run_every below, which Streamlit fixes for
+# the lifetime of the fragment until the next full script rerun. _apps_table
+# recomputes the current value each time it runs and calls st.rerun() (a full
+# rerun, not fragment-scoped) whenever it flips, so this cadence catches up
+# within one tick instead of waiting for the next full page load.
+_has_transient_prior = st.session_state.get("apps-has-transient", False)
 
-@st.fragment(run_every=10 if auto else None)
+
+@st.fragment(run_every=10 if (auto or _has_transient_prior) else None)
 def _apps_table() -> None:
-    if auto:
+    if auto or _has_transient_prior:
         _refresh_now()
     try:
         apps = list_apps()
     except ControllerError as e:
         st.error(f"Failed to load apps: {e}")
         st.stop()
+
+    prev_transient = st.session_state.get("apps-has-transient", False)
+    has_transient_now = any((a.get("last_deploy_status") or "") in _TRANSIENT for a in apps)
+    st.session_state["apps-has-transient"] = has_transient_now
+    if has_transient_now != prev_transient:
+        # Guarded by the != check above: this only fires on an actual flip, so it
+        # cannot loop (the next run sees prev_transient already matching).
+        st.rerun()
 
     if apps_status_unavailable():
         st.warning(
@@ -127,11 +202,19 @@ def _apps_table() -> None:
         st.info("No apps registered yet. Use the Register page to add one.")
         st.stop()
 
+    # Health is never fetched for every row on a normal list render (would be an
+    # N-query fan-out on every 10s auto-refresh tick) - only shown once the
+    # operator has clicked "Fleet health" above, and only reflects that click's
+    # snapshot (not re-fetched on the next auto-refresh tick).
+    fleet_health = st.session_state.get("fleet-health")
+
     table_rows = [
         {
             "name": a["name"],
             "service_status": _status_badge(a.get("service_status")),
             "last_deploy_status": _status_badge(a.get("last_deploy_status")),
+            "platform": _platform_badge(bool(a.get("platform_update_available"))),
+            **({"health": _health_badge(fleet_health.get(a["name"]))} if fleet_health is not None else {}),
             "endpoint_url": a.get("endpoint_url") or "",
             "pad_file": pad_filename(a.get("pad_stage_path")),
             "last_deployed_at": a.get("last_deployed_at") or "",
@@ -151,6 +234,16 @@ def _apps_table() -> None:
         on_select="rerun",
         column_config={
             "endpoint_url": st.column_config.LinkColumn("endpoint_url", width="large"),
+            "platform": st.column_config.TextColumn(
+                "platform",
+                help="Flags an app whose service was last respec'd against an "
+                     "older platform image than the one currently running.",
+            ),
+            "health": st.column_config.TextColumn(
+                "health",
+                help="Container-level readiness as of the last 'Fleet health' click - "
+                     "not live, and absent until that button has been clicked once.",
+            ),
             "pad_file": st.column_config.TextColumn(
                 "pad_file",
                 help="PAD = Portable Application Deployment Archive, Mendix's "
@@ -185,6 +278,21 @@ def _apps_table() -> None:
         _bulk_panel(apps, selected_names)
 
 
+@st.fragment(run_every=3)
+def _progress_caption(selected_name: str) -> None:
+    """Cheap (no warehouse query) live phase text while a background lifecycle
+    task is in flight. Its own short-interval fragment so it can tick without
+    dragging the whole detail panel - and the main Apps fetch - along with it.
+    The caller re-checks the transient status on its own next refresh and simply
+    stops calling this once the app is no longer transient."""
+    try:
+        text = client().get_progress(selected_name).get("progress")
+    except ControllerError:
+        return
+    if text:
+        st.caption(f"In progress: {text}")
+
+
 @st.fragment
 def _detail_panel(selected_name: str) -> None:
     try:
@@ -210,6 +318,23 @@ def _detail_panel(selected_name: str) -> None:
         "Deploy status is our own record of the last action requested here and only "
         "changes when you trigger one."
     )
+    if deploy_status == "FAILED":
+        st.caption(
+            f"Failed during {record.get('failed_operation') or 'an unrecorded operation'}: "
+            f"{record.get('status_detail') or 'no further detail was recorded.'}"
+        )
+    if deploy_status in _TRANSIENT:
+        _progress_caption(selected_name)
+
+    # Eager fetch for the one selected app only (a single SHOW SERVICE CONTAINERS
+    # call) - never for every row of the table, see the Fleet health button above.
+    try:
+        health = client().get_health(selected_name)
+    except ControllerError:
+        health = None
+    health_badge = _health_badge(health)
+    if health_badge:
+        st.caption(f"{health_badge} — container-level health (readinessProbe), distinct from service status above.")
 
     if record.get("endpoint_url"):
         st.write(f"Endpoint: {record['endpoint_url']}")
@@ -282,6 +407,22 @@ def _detail_panel(selected_name: str) -> None:
                     client().delete_app(selected_name)
                     _refresh_now()
                     st.success(f"Deleted {selected_name}.")
+                    st.rerun()
+                except ControllerError as e:
+                    st.error(str(e))
+
+    if record.get("platform_update_available"):
+        with st.popover("Apply platform update", use_container_width=True):
+            st.warning(
+                f"This will respec `{selected_name}` onto the current platform image with no "
+                "other change. The service restarts and active end-user sessions are dropped."
+            )
+            if st.button("Confirm platform update", key=f"platform-update-go-{selected_name}",
+                         type="primary", disabled=deploy_status in _TRANSIENT):
+                try:
+                    client().apply_platform_update(selected_name)
+                    _refresh_now()
+                    st.success("Platform update triggered. Service is restarting.")
                     st.rerun()
                 except ControllerError as e:
                     st.error(str(e))
@@ -622,14 +763,185 @@ def _detail_panel(selected_name: str) -> None:
                 except ControllerError as e:
                     st.error(str(e))
 
+    with st.expander("External access"):
+        try:
+            eai_slots = client().get_external_access_slots()
+        except ControllerError as e:
+            st.error(f"Failed to load external access slots: {e}")
+            eai_slots = []
+
+        if not eai_slots:
+            st.caption("No external access slots configured.")
+        else:
+            st.warning(
+                "Changing external access restarts the service. Active end-user "
+                "sessions on this app will be dropped when the restart happens."
+            )
+            current_slots = set(record.get("external_access") or [])
+            bound_keys = {s["key"] for s in eai_slots if s.get("bound")}
+            stale = current_slots - bound_keys
+            if stale:
+                st.warning(
+                    "This app is recorded as attached to slot(s) that are no longer "
+                    "bound at the account level: " + ", ".join(f"`{s}`" for s in sorted(stale)) +
+                    ". They stay attached to the running service until the next "
+                    "external-access save or rollback, which drops them silently."
+                )
+
+            new_selection: list[str] = []
+            for slot in eai_slots:
+                key = slot["key"]
+                checked = st.checkbox(
+                    slot.get("label") or key,
+                    value=key in current_slots,
+                    disabled=not slot.get("bound"),
+                    help=None if slot.get("bound") else "not bound yet - see Setup page",
+                    key=f"eai-{selected_name}-{key}",
+                )
+                if checked:
+                    new_selection.append(key)
+
+            added = sorted(set(new_selection) - current_slots)
+            removed = sorted(current_slots - set(new_selection))
+            eai_diff = [f"- {k}" for k in removed] + [f"+ {k}" for k in added]
+
+            if not eai_diff:
+                st.caption("No changes.")
+            else:
+                st.caption("Pending changes:")
+                st.code("\n".join(eai_diff), language="diff")
+
+                eai_confirm = st.text_input(
+                    f"Type `{selected_name}` to confirm:",
+                    key=f"eai-confirm-{selected_name}",
+                )
+                if st.button(
+                    "Apply external access changes",
+                    key=f"eai-apply-{selected_name}",
+                    type="primary",
+                    disabled=(eai_confirm != selected_name) or (deploy_status in _TRANSIENT),
+                ):
+                    try:
+                        client().update_external_access(selected_name, new_selection)
+                        _refresh_now()
+                        st.success("External access update triggered. Service will restart.")
+                        st.rerun()
+                    except ControllerError as e:
+                        st.error(str(e))
+
+    with st.expander("History"):
+        try:
+            history = client().list_history(selected_name)
+        except ControllerError as e:
+            st.error(f"Failed to load history: {e}")
+            history = []
+
+        if not history:
+            st.caption("No deploy history recorded yet.")
+        else:
+            st.caption(
+                "Newest first. Each row is a snapshot of the configuration a "
+                "deploy/constants/spec/license/role-mapping/platform-update/rollback "
+                "attempt applied - not a log of every field, just this app's PAD, "
+                "resource tier, caller rights, license, and role mapping at the time."
+            )
+            history_rows = [
+                {
+                    "ts": h.get("ts") or "",
+                    "operation": h.get("operation") or "",
+                    "status": h.get("status") or "",
+                    "pad_file": pad_filename(h.get("pad_stage_path")),
+                    "detail": h.get("detail") or "",
+                }
+                for h in history
+            ]
+            st.dataframe(history_rows, use_container_width=True, hide_index=True)
+
+            # Newest READY row - list_for_app is already newest-first, so the first
+            # match here is exactly what the controller's own last_success() targets.
+            rollback_target = next((h for h in history if h.get("status") == "READY"), None)
+            if rollback_target is None:
+                st.caption("No successful deployment recorded yet; nothing to roll back to.")
+            else:
+                target_label = f"{rollback_target.get('ts') or '?'} ({pad_filename(rollback_target.get('pad_stage_path')) or '(no PAD)'})"
+                with st.popover(f"Roll back to {target_label}", use_container_width=True):
+                    st.warning(
+                        f"This will roll `{selected_name}` back to the deployment configuration "
+                        f"(PAD, resource tier, caller rights, license, role mapping) recorded at "
+                        f"{rollback_target.get('ts') or '?'}. The service restarts and active "
+                        "end-user sessions are dropped."
+                    )
+                    st.caption(
+                        "Constant values are never restored: the app keeps its CURRENT "
+                        "constant values, since only constant names (not values) are ever "
+                        "recorded in history."
+                    )
+                    rollback_confirm = st.text_input(
+                        f"Type `{selected_name}` to confirm:",
+                        key=f"rollback-confirm-{selected_name}",
+                    )
+                    if st.button(
+                        "Confirm rollback",
+                        key=f"rollback-go-{selected_name}",
+                        type="primary",
+                        disabled=(rollback_confirm != selected_name) or (deploy_status in _TRANSIENT),
+                    ):
+                        try:
+                            client().rollback(selected_name)
+                            _refresh_now()
+                            st.success("Rollback triggered. Service is restarting.")
+                            st.rerun()
+                        except ControllerError as e:
+                            st.error(str(e))
+
+            # Per-entry rollback: every READY row (not just the newest one above)
+            # gets its own action, so an operator can target an older-but-still-good
+            # configuration directly instead of only the latest success.
+            ready_entries = [h for h in history if h.get("status") == "READY"]
+            if ready_entries:
+                st.caption("Or roll back to a specific entry:")
+                for h in ready_entries:
+                    entry_id = h.get("id")
+                    entry_label = f"{h.get('ts') or '?'} ({pad_filename(h.get('pad_stage_path')) or '(no PAD)'})"
+                    with st.popover(f"Roll back to this entry — {entry_label}", use_container_width=True):
+                        st.warning(
+                            f"This will roll `{selected_name}` back to the deployment configuration "
+                            f"(PAD, resource tier, caller rights, license, role mapping) recorded at "
+                            f"{h.get('ts') or '?'}. The service restarts and active end-user "
+                            "sessions are dropped."
+                        )
+                        st.caption(
+                            "Constant values are never restored: the app keeps its CURRENT "
+                            "constant values, since only constant names (not values) are ever "
+                            "recorded in history."
+                        )
+                        entry_confirm = st.text_input(
+                            f"Type `{selected_name}` to confirm:",
+                            key=f"rollback-entry-confirm-{selected_name}-{entry_id}",
+                        )
+                        if st.button(
+                            "Confirm rollback",
+                            key=f"rollback-entry-go-{selected_name}-{entry_id}",
+                            type="primary",
+                            disabled=(entry_confirm != selected_name) or (deploy_status in _TRANSIENT),
+                        ):
+                            try:
+                                client().rollback(selected_name, entry_id=entry_id)
+                                _refresh_now()
+                                st.success("Rollback triggered. Service is restarting.")
+                                st.rerun()
+                            except ControllerError as e:
+                                st.error(str(e))
+
 
 @st.fragment
 def _bulk_panel(apps: list[dict], names: list[str]) -> None:
     selected_apps = [a for a in apps if a["name"] in names]
+    flagged_names = [a["name"] for a in selected_apps if a.get("platform_update_available")]
     st.subheader(f"Bulk actions — {len(names)} apps selected")
     st.write("Selected: " + ", ".join(f"`{n}`" for n in names))
 
-    action_cols = st.columns(3)
+    action_cols = st.columns(4)
 
     with action_cols[0]:
         with st.popover(f"Suspend ({len(names)})", use_container_width=True):
@@ -671,6 +983,20 @@ def _bulk_panel(apps: list[dict], names: list[str]) -> None:
                          type="primary",
                          disabled=(confirm_text != expected)):
                 _run_bulk(names, "delete", lambda n: client().delete_app(n))
+                st.rerun()
+
+    with action_cols[3]:
+        with st.popover(f"Apply platform update ({len(flagged_names)})", use_container_width=True,
+                        disabled=not flagged_names):
+            st.warning(
+                f"These {len(flagged_names)} flagged services will be respec'd onto the current "
+                "platform image with no other change and will restart, dropping active sessions. "
+                "Apps not flagged for a platform update are skipped."
+            )
+            for n in flagged_names:
+                st.write(f"- `{n}`")
+            if st.button("Confirm platform update", key="bulk-platform-update-go", type="primary"):
+                _run_bulk(flagged_names, "platform update", lambda n: client().apply_platform_update(n))
                 st.rerun()
 
     last_result = st.session_state.get("bulk-last-result")
