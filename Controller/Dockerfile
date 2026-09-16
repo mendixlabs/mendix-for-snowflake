@@ -10,6 +10,10 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
+COPY --from=project LICENSE.txt /licenses/project/LICENSE.txt
+COPY --from=project compliance/IMAGE-NOTICES.txt /licenses/README.txt
+COPY --from=project compliance/collect_python_notices.py /tmp/collect_python_notices.py
+COPY --from=project compliance/upstream/ /tmp/upstream-notices/
 # Runtime-writable dirs for uid 65532 (nonroot): snowflake-connector OCSP cache.
 # Created here because the distroless final stage has no shell/mkdir.
 RUN mkdir -p /home/nonroot/.cache/snowflake \
@@ -33,6 +37,8 @@ RUN mkdir -p /opt/runtime-libs \
              /usr/lib/x86_64-linux-gnu/libreadline.so.8* \
              /opt/runtime-libs/
 
+RUN python /tmp/collect_python_notices.py
+
 # --- runtime ---------------------------------------------------------------
 # distroless/cc-debian13 = glibc + libssl + libstdc++, no shell, no package
 # manager. Same Debian 13 (trixie) userland as the python:3.14-slim builder
@@ -45,6 +51,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391f
 # /usr/local carries the interpreter, stdlib C extensions (lib-dynload),
 # libpython3.14.so, and all pip-installed packages in one consistent copy.
 COPY --from=builder --chown=65532:65532 /usr/local /usr/local
+COPY --from=builder /licenses /licenses
 # Stdlib-required shared libs absent from distroless cc (see builder stage).
 COPY --from=builder /opt/runtime-libs/ /usr/lib/x86_64-linux-gnu/
 COPY --from=builder --chown=65532:65532 /app /app

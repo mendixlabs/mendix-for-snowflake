@@ -1,0 +1,23 @@
+Mendix on Snowpark Container Services: license material
+
+The project license is /licenses/project/LICENSE.txt.
+Third-party components retain their own licenses and copyright notices.
+
+Python service images:
+  /licenses/python-packages.json lists installed Python distributions.
+  /licenses/python/ preserves their packaged license and NOTICE files,
+    including notices for vendored libraries and frontend bundles when present.
+  /licenses/CPython-LICENSE.txt contains CPython's license and bundled notices.
+  /licenses/copied-debian/ contains notices for copied native libraries.
+  /licenses/common-licenses/ contains the full Debian common license texts.
+  /licenses/copied-debian-packages.json records corresponding source versions.
+  /usr/share/doc/ contains the distroless base's package copyright files.
+
+Mendix base image:
+  /opt/java/openjdk/legal/ contains the JRE's license material.
+  /usr/share/doc/ and /usr/share/common-licenses/ contain OS package notices.
+  /licenses/os-packages.tsv records installed package and source versions.
+
+The release evidence pack includes the image SBOM, an extracted copy of notices,
+source references, and detected license issues. Preserve that pack alongside the
+exact distributed images.

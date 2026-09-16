@@ -23,7 +23,8 @@
 #   }
 
 param(
-    [string]$Config = "native-app-config.json"
+    [string]$Config = "native-app-config.json",
+    [string]$SyftPath = "syft"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,10 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir   = Split-Path -Parent $scriptDir                       # native-app/
 $repoRoot  = Split-Path -Parent $rootDir                         # project root
 $configPath = if ([System.IO.Path]::IsPathRooted($Config)) { $Config } else { Join-Path $scriptDir $Config }
+
+# Verify evidence tools before changing the registry.
+Get-Command python -ErrorAction Stop | Out-Null
+Get-Command $SyftPath -ErrorAction Stop | Out-Null
 
 if (-not (Test-Path $configPath)) {
     Write-Error "Config not found: $configPath (copy native-app-config.example.json and fill it in)"
@@ -73,7 +78,7 @@ foreach ($name in $images.Keys) {
     # SPCS requires a single linux/amd64 image. --provenance=false suppresses the
     # BuildKit attestation/provenance manifests that otherwise make the push an OCI
     # manifest list, which SPCS can fail to resolve at CREATE SERVICE time.
-    & docker build --platform linux/amd64 --provenance=false -t $name $context
+    & docker build --platform linux/amd64 --provenance=false --build-context "project=$repoRoot" -t $name $context
     if ($LASTEXITCODE -ne 0) { Write-Error "Build failed: $name"; exit 1 }
     & docker tag $name "$repoUrl/${name}:latest"
     & docker push "$repoUrl/${name}:latest"
@@ -89,6 +94,15 @@ foreach ($name in $images.Keys) {
     }
 }
 
+# Capture the exact pushed images, including their immutable registry references.
+$evidenceDir = Join-Path $repoRoot ("artifacts/oss/release-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+$evidenceArgs = @((Join-Path $repoRoot "compliance/build_evidence.py"), "--output", $evidenceDir, "--syft", $SyftPath)
+foreach ($name in $images.Keys) {
+    $evidenceArgs += @("--image", "$name=$repoUrl/$name$($digests[$name])")
+}
+& python @evidenceArgs
+if ($LASTEXITCODE -ne 0) { throw "OSS evidence capture failed. Release staging stopped." }
+
 # ---- stage a deploy copy with tokens resolved --------------------------------
 # The committed app/ keeps <PROVIDER_*> tokens so the personal DB name stays out
 # of git. Resolve them into a gitignored .build/ copy that `snow app` deploys.
@@ -97,6 +111,7 @@ $buildDir = Join-Path $rootDir ".build"
 if (Test-Path $buildDir) { Remove-Item $buildDir -Recurse -Force }
 Copy-Item (Join-Path $rootDir "app") (Join-Path $buildDir "app") -Recurse
 Copy-Item (Join-Path $rootDir "snowflake.yml") (Join-Path $buildDir "snowflake.yml")
+Copy-Item (Join-Path $repoRoot "LICENSE.txt") (Join-Path $buildDir "app/LICENSE.txt")
 
 foreach ($f in @("app/manifest.yml", "app/setup_script.sql")) {
     $p = Join-Path $buildDir $f
@@ -118,4 +133,5 @@ Write-Host ""
 Write-Host "Done!" -ForegroundColor Green
 Write-Host "  Images:  $repoUrl/{mendix-deploy-controller,mendix-admin-ui,mendix-base}:latest"
 Write-Host "  Staged:  $buildDir  (image refs pinned to @sha256 digests)"
+Write-Host "  OSS evidence: $evidenceDir (archive with this release; Siemens approval remains separate)"
 Write-Host "  Deploy:  snow app run -p `"$buildDir`" --connection $conn" -ForegroundColor Yellow

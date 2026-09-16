@@ -26,6 +26,8 @@ on:
       - 'Controller/**'
       - 'Admin UI/**'
       - 'Mendix Base Image/**'
+      - 'compliance/**'
+      - 'LICENSE.txt'
       - '.github/workflows/security-scan.yml'
   pull_request:
     branches: [main]
@@ -33,6 +35,8 @@ on:
       - 'Controller/**'
       - 'Admin UI/**'
       - 'Mendix Base Image/**'
+      - 'compliance/**'
+      - 'LICENSE.txt'
       - '.github/workflows/security-scan.yml'
   schedule:
     # Weekly: catches newly disclosed CVEs against unchanged dependency pins.
@@ -87,7 +91,7 @@ jobs:
       - name: Build image
         # Same platform flag as native-app/scripts/build-and-push.ps1;
         # --provenance only matters for the registry push, not a local scan.
-        run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
+        run: docker build --platform linux/amd64 --build-context project=. -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
       - name: Check runtime imports
         if: matrix.image != 'mendix-base'
         env:
@@ -187,7 +191,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build image
-        run: docker build --platform linux/amd64 -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
+        run: docker build --platform linux/amd64 --build-context project=. -t "${{ matrix.image }}:scan" "${{ matrix.context }}"
       - name: Export image filesystem
         run: |
           cid=$(docker create "${{ matrix.image }}:scan")

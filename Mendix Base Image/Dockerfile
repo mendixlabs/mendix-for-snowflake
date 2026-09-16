@@ -8,6 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # temurin bundles Canonical's pebble service manager (not dpkg-owned); this
     # image never uses it and its Go deps carry CVEs, so remove it outright.
     && rm -f /usr/bin/pebble
+COPY --from=project LICENSE.txt /licenses/project/LICENSE.txt
+COPY --from=project compliance/IMAGE-NOTICES.txt /licenses/README.txt
+RUN dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' > /licenses/os-packages.tsv
 WORKDIR /mendix
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh \

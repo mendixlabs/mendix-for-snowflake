@@ -30,6 +30,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $moduleDir = Split-Path -Parent $scriptDir
 $sourceDir = Join-Path $moduleDir "Source"
 $mpkPath   = Join-Path $moduleDir "SnowflakeSSO.mpk"
+$licensePath = Join-Path (Split-Path -Parent $moduleDir) "LICENSE.txt"
 
 if (-not (Test-Path $mpkPath)) {
     Write-Error "Not found: $mpkPath"
@@ -100,6 +101,17 @@ try {
     }
 
     $changed = @()
+    # Include the project's license in every module archive. This archive-root
+    # document does not change the Mendix model or its declared source files.
+    if (-not (Test-Path -LiteralPath $licensePath)) {
+        throw "Project license missing: $licensePath"
+    }
+    $archiveLicense = Join-Path $tmpDir "LICENSE.txt"
+    if (-not (Test-Path -LiteralPath $archiveLicense) -or
+        (Get-FileHash -LiteralPath $licensePath).Hash -ne (Get-FileHash -LiteralPath $archiveLicense).Hash) {
+        Copy-Item -LiteralPath $licensePath -Destination $archiveLicense -Force
+        $changed += "LICENSE.txt"
+    }
     foreach ($relPath in $files) {
         $srcPath = Join-Path $sourceDir ($relPath -replace "/", "\")
         if (-not (Test-Path $srcPath)) {

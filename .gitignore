@@ -14,4 +14,10 @@ SUPPORT-CASE-native-app-executeascaller.*
 RUNBOOK-dry-run.md
 CHANGELOG-validation.md
 PLAN-*.md
+TODO-List.md
 .coverage
+
+# Generated OSS tools and release evidence. Keep evidence in the release archive.
+.oss-tools/
+artifacts/oss/
+App Components/*.mpk.bak

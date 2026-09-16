@@ -1,0 +1,11 @@
+check-for-app-update: false
+scope: squashed
+license:
+  content: all
+package:
+  search-indexed-archives: true
+  search-unindexed-archives: true
+file:
+  metadata:
+    selection: owned-by-package
+    digests: [sha256]

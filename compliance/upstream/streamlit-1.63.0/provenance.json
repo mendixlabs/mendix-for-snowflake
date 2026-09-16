@@ -1,0 +1,67 @@
+{
+  "component": "streamlit",
+  "version": "1.63.0",
+  "commit": "cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24",
+  "files": [
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/LICENSE",
+      "sha256": "c95bae1d1ce0235ecccd3560b772ec1efb97f348a79f0fbe0a634f0c2ccefe2c"
+    },
+    {
+      "path": "NOTICES",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/NOTICES",
+      "sha256": "7868e13cdd219a29f0858532ed5aa61f696da8758e4accdbfd02406c1104cc86"
+    },
+    {
+      "path": "frontend/app/src/assets/fonts/Source_Code/Source-Code.LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/app/src/assets/fonts/Source_Code/Source-Code.LICENSE",
+      "sha256": "0b2c3168605cb4f3ba54cf3cf2003f67ff894c66484c75702007f23eda92c353"
+    },
+    {
+      "path": "frontend/app/src/assets/fonts/Source_Sans/Source-Sans.LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/app/src/assets/fonts/Source_Sans/Source-Sans.LICENSE",
+      "sha256": "937d1985d2d6d003b6efdfa47e098b96c69d55395175f154d7f56410c942f978"
+    },
+    {
+      "path": "frontend/app/src/assets/fonts/Source_Serif/Source-Serif.LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/app/src/assets/fonts/Source_Serif/Source-Serif.LICENSE",
+      "sha256": "c21d7293d87b6d7ab1d0229a2f55b77f33a7613a6a4e66f6693d68d7d8d09464"
+    },
+    {
+      "path": "frontend/app/src/assets/img/Material-Icons.LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/app/src/assets/img/Material-Icons.LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "frontend/app/src/assets/img/Open-Iconic.LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/app/src/assets/img/Open-Iconic.LICENSE",
+      "sha256": "29d4c03ea5ae62e216f61b04718540fd4c9960dfb6dff3e2f666ffc9591775ab"
+    },
+    {
+      "path": "frontend/component-v2-lib/LICENSE",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/component-v2-lib/LICENSE",
+      "sha256": "cc4d4de0920b0d3912203b5d9aa76728ac4a11087f55da9ea00576db7d1e34e2"
+    },
+    {
+      "path": "frontend/lib/src/vendor/decamelize/decamelize-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/lib/src/vendor/decamelize/decamelize-LICENSE.txt",
+      "sha256": "5a65efd60af33e4e1f808e55e33a95464a18a1a247e450516d79664c8b38b110"
+    },
+    {
+      "path": "frontend/lib/src/vendor/fzy.js/fzyjs-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/lib/src/vendor/fzy.js/fzyjs-LICENSE.txt",
+      "sha256": "4f13fd12e890f80db67d2cc489b5f982e7713434c2ed3987b7e6ad05211a79b2"
+    },
+    {
+      "path": "frontend/lib/src/vendor/react-bootstrap-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/lib/src/vendor/react-bootstrap-LICENSE.txt",
+      "sha256": "a803369620c2ac8331204b0425405f8df2e1b8e4724f3fbd834c98625153500c"
+    },
+    {
+      "path": "frontend/lib/src/vendor/sprintf.js/sprintfjs-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/streamlit/streamlit/cb9aba9ff4d89c496ed15fd1aa7ee1fef19e0c24/frontend/lib/src/vendor/sprintf.js/sprintfjs-LICENSE.txt",
+      "sha256": "f8287e4dd9480be58c56aca4a55c23b782c43a86e69aabad78fff4df0d29edef"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+name: OSS evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    name: Evidence (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [mendix-deploy-controller, mendix-admin-ui, mendix-base]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: Test evidence extraction
+        run: python -m unittest discover -s compliance/tests
+      - name: Install pinned Syft
+        run: python compliance/install_syft.py
+      - name: Build and collect image evidence
+        run: >-
+          python compliance/build_evidence.py --build --require-clean
+          --syft .oss-tools/syft
+          --output artifacts/oss/evidence
+          --image '${{ matrix.image }}=${{ matrix.image }}:oss-review'
+      - name: Resolve corresponding-source references
+        run: python compliance/source_references.py artifacts/oss/evidence
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oss-${{ matrix.image }}-${{ github.sha }}
+          path: artifacts/oss/evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+  bundle:
+    name: Bundle OSS evidence
+    needs: evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: oss-*-${{ github.sha }}
+          path: artifacts/oss/by-image
+      - name: Add bundle provenance
+        shell: bash
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > artifacts/oss/PROVENANCE.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oss-evidence-${{ github.sha }}
+          path: artifacts/oss/
+          if-no-files-found: error
+          retention-days: 90

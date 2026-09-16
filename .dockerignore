@@ -1,0 +1,8 @@
+# The named project context supplies only compliance build inputs.
+**
+!LICENSE.txt
+!compliance/
+!compliance/collect_python_notices.py
+!compliance/IMAGE-NOTICES.txt
+!compliance/upstream/
+!compliance/upstream/**
