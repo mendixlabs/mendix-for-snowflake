@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 import streamlit as st
 
 from auth import client, current_operator, operator_roles
+from controller_client import ControllerError
 
 
 @st.cache_data(ttl=60)
@@ -27,6 +28,25 @@ def apps_status_unavailable() -> bool:
     a cached copy) failed outright - every app's service_status reads None in
     that response regardless of whether the fleet itself is healthy."""
     return bool(st.session_state.get("apps_status_unavailable"))
+
+
+@st.cache_data(ttl=300)
+def _egress_warning_cached(operator: str, roles: tuple[str, ...]) -> dict:
+    # GET /apps returns a bare list, not an object, so there's nowhere to carry
+    # an extra top-level "egress is expiring" field without changing every
+    # existing caller of it - a dedicated GET /system/egress-warning is
+    # cheaper to add than reshaping that response. The value itself only
+    # changes once a day (egress_watch's own loop cadence), so a 300s TTL
+    # keeps this off the Apps page's 10s auto-refresh tick entirely, unlike
+    # _list_apps_cached's 60s (apps can change status far more often).
+    try:
+        return client().get_egress_warning()
+    except ControllerError:
+        return {"warn": False, "days_remaining": None}
+
+
+def egress_warning() -> dict:
+    return _egress_warning_cached(current_operator(), operator_roles())
 
 
 def pad_filename(pad_stage_path: str | None) -> str:

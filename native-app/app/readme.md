@@ -32,6 +32,30 @@ These are account-level objects the app cannot create for itself. The admin UI's
    for each Mendix app you register).
 4. Create the secret with the Postgres credentials, then bind it as `pg_secret`.
 
+### Set up with Cortex Code
+
+After installing the application, grant its `app_admin` application role to the
+role used by Cortex Code, then ask Cortex Code to load the built-in setup runbook:
+
+```sql
+GRANT APPLICATION ROLE <app_name>.app_admin TO ROLE <operator_role>;
+
+SELECT step_number, title, instructions, requires_approval, verify_sql
+FROM <app_name>.app_public.ai_setup_steps
+ORDER BY step_number;
+```
+
+Suggested prompt:
+
+> Load the setup steps from the installed application. Show me the plan first,
+> follow the steps in order, ask before every step marked `requires_approval`,
+> never put a password in chat or logs, and run each verification before moving on.
+
+The view is available immediately after installation. It does not depend on the
+Postgres references or container services being ready. `AI-SETUP.md` in the
+application source defines the agent safety and reporting rules; the view is the
+consumer-accessible executable version.
+
 ## Per-app Postgres isolation
 
 Each Mendix app gets its own Postgres role and password, scoped to only that
@@ -39,6 +63,36 @@ app's own database. The controller creates both when you register the app.
 Every app container connects as its own per-app role - never as the shared
 `application` bootstrap credential above, which the controller holds and
 never mounts into an app container.
+
+## Optional per-app external access (`app_eai_1..4`)
+
+Deployed Mendix apps have no outbound network access beyond Postgres by
+default. Four optional external-access-integration slots let an app reach
+other APIs:
+
+- **Four slots.** `app_eai_1` through `app_eai_4` are four separate slots you
+  can bind an integration to.
+- **Shared across the whole installation, not per Mendix app.** Binding a
+  slot (Setup page, or `register_reference`) is a one-time, install-wide
+  action. Register several Mendix apps inside one installation and they all
+  draw from the same four bound integrations; none of them gets a private
+  slot.
+- **No self-service fifth slot.** Adding a 5th requires a provider-side
+  manifest change and a new app version. A consumer cannot create additional
+  slots themselves.
+- **One slot can cover a lot of ground.** An external access integration is
+  built on a network rule, and a network rule's `VALUE_LIST` can hold many
+  hosts and ports at once. Group everything an app needs to reach (say, every
+  internal API on the same network boundary) under one rule and bind that as
+  a single slot, instead of giving each destination its own. The same bound
+  integration can also be attached to more than one Mendix app at a time, so
+  app A and app B can both attach to `app_eai_1` simultaneously.
+
+Bind a slot on the **Setup / Verify** page (step 7), then attach individual
+apps to it from the Register page (new apps) or the Apps page's External
+access panel (existing apps). Binding a slot restarts the controller and
+admin UI (they re-specify to pick up the new `APP_EAI_N` env var); attaching
+or detaching one app from a slot restarts only that app's own service.
 
 ## Required Snowflake role
 
