@@ -41,7 +41,7 @@ RUN mkdir -p /opt/runtime-libs \
 # 2.36 predates the GLIBC_2.38 symbols libpython3.12.so needs.
 # NOTE: no RUN is possible in this stage (no shell). Anything needing mkdir/
 # chown at build time goes in the builder stage above.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d3cda6e91129130d7229a1806b6a73d292ef245ab032da7851907798024cefba
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:aded2458d026e046cb68199db0e5793e1028ffa143f7258f3c4278253e20add7
 # /usr/local carries the interpreter, stdlib C extensions (lib-dynload),
 # libpython3.12.so, and all pip-installed packages in one consistent copy.
 COPY --from=builder --chown=65532:65532 /usr/local /usr/local
