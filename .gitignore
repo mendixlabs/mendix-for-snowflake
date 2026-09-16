@@ -15,6 +15,7 @@ RUNBOOK-dry-run.md
 CHANGELOG-validation.md
 PLAN-*.md
 TODO-List.md
+native-app/HOW-TO-PUBLISH.md
 .coverage
 
 # Generated OSS tools and release evidence. Keep evidence in the release archive.
