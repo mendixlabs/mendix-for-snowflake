@@ -4,4 +4,4 @@ uvicorn[standard]==0.52.1
 snowflake-connector-python==4.7.2
 pydantic==2.13.4
 PyYAML==6.0.3
-psycopg[binary]==3.3.4
+psycopg[binary]==3.3.5
