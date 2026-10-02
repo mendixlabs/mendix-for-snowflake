@@ -48,7 +48,7 @@ RUN python /tmp/collect_python_notices.py
 # GLIBC_2.38 symbols libpython3.14.so needs.
 # NOTE: no RUN is possible in this stage (no shell). Anything needing mkdir/
 # chown at build time goes in the builder stage above.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 # /usr/local carries the interpreter, stdlib C extensions (lib-dynload),
 # libpython3.14.so, and all pip-installed packages in one consistent copy.
 COPY --from=builder --chown=65532:65532 /usr/local /usr/local
